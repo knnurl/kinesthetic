@@ -23,7 +23,7 @@
 // ============================================================
 //  BUILD FLAG  (pick exactly one)
 // ============================================================
-//#define INPUT_TOF
+// #define INPUT_TOF
 // #define INPUT_POT_BTN
 #define INPUT_TOF_WIFI
 
