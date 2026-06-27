@@ -1,0 +1,73 @@
+# .github/workflows/build.yml
+# Compiles the INPUT_TOF_WIFI build of kinetic_sculpture.ino and publishes
+# firmware.bin to a rolling "latest" release. Push the sketch, wait ~1-2 min,
+# then update from the phone (Setup -> Download & install).
+#
+# Expected repo layout: kinetic_sculpture.ino at the repo root.
+# The phone pull URL is one of (both stable):
+#   https://github.com/<you>/<repo>/releases/download/latest/firmware.bin
+#   https://github.com/<you>/<repo>/releases/latest/download/firmware.bin
+
+name: build-firmware
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:        # lets you also trigger a build by hand
+
+permissions:
+  contents: write           # needed to publish the release asset
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 core and libraries
+        run: |
+          arduino-cli config init --additional-urls \
+            https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+          arduino-cli lib install \
+            "FastAccelStepper" \
+            "TMCStepper" \
+            "WebSockets" \
+            "ArduinoJson"
+
+      - name: Force INPUT_TOF_WIFI build flag
+        run: |
+          sed -E -i \
+            -e 's|^(// *)?#define INPUT_TOF$|// #define INPUT_TOF|' \
+            -e 's|^(// *)?#define INPUT_POT_BTN$|// #define INPUT_POT_BTN|' \
+            -e 's|^(// *)?#define INPUT_TOF_WIFI$|#define INPUT_TOF_WIFI|' \
+            kinetic_sculpture.ino
+          echo "Active build flags:"
+          grep -nE '^[^/]*#define INPUT_' kinetic_sculpture.ino
+
+      - name: Arrange sketch folder
+        run: |
+          mkdir -p sketch/kinetic_sculpture
+          cp kinetic_sculpture.ino sketch/kinetic_sculpture/
+
+      - name: Compile
+        run: |
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32c3:PartitionScheme=min_spiffs \
+            --output-dir output \
+            sketch/kinetic_sculpture
+          cp output/kinetic_sculpture.ino.bin firmware.bin
+          ls -lh firmware.bin
+
+      - name: Publish to rolling "latest" release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest firmware
+          files: firmware.bin
+          prerelease: false
+          make_latest: "true"
