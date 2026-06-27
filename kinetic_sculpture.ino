@@ -23,9 +23,9 @@
 // ============================================================
 //  BUILD FLAG  (pick exactly one)
 // ============================================================
-//#define INPUT_TOF
+#define INPUT_TOF
 // #define INPUT_POT_BTN
-#define INPUT_TOF_WIFI
+// #define INPUT_TOF_WIFI
 
 #if (defined(INPUT_POT_BTN) + defined(INPUT_TOF) + defined(INPUT_TOF_WIFI)) != 1
 #error "Define exactly one input mode: INPUT_POT_BTN, INPUT_TOF, or INPUT_TOF_WIFI"
