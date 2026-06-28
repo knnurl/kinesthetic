@@ -87,6 +87,8 @@ const int SCL_PIN = 3;     // ToF10120 I2C clock
 // ============================================================
 #define FREQ_MIN   100      // steps/sec, below this the motor is treated as stopped
 #define FREQ_MAX   4000     // steps/sec maximum
+#define MANUAL_MIN_MOVE 200 // steps/sec the slider's lowest non-zero step maps to,
+                            // so even 1% produces real motion (no dead low end)
 #define SMOOTH_TIME_UP   0.5f   // sec, responsiveness when speeding up (lower = snappier)
 #define SMOOTH_TIME_DOWN 1.1f   // sec, when slowing down (higher = gentler wind down)
 #define MAX_ACCEL  10000    // steps/sec^2, hard ceiling on rate of change
@@ -419,11 +421,12 @@ void initTMC() {
 // ============================================================
 #define OTPW_CONFIRM 3    // consecutive overtemp reads before derating (~1.5s at 2Hz)
 #define OTPW_DISABLE 20   // consecutive overtemp reads before disable+latch (~10s)
-#define COMM_CONFIRM 3    // consecutive bad GCONF reads before flagging comm loss
+#define COMM_CONFIRM 5    // consecutive bad GCONF reads before flagging comm loss (~2.5s at 2Hz)
 
 void pollHealth() {
   uint32_t g = driver.GCONF();
   bool commBad = (g == 0 || g == 0xFFFFFFFF);
+  if (commBad) { g = driver.GCONF(); commBad = (g == 0 || g == 0xFFFFFFFF); }  // retry once: UART reads can glitch while stepping
 
   static uint8_t commBadCount = 0;
   if (commBad) { if (commBadCount < 255) commBadCount++; }
@@ -872,7 +875,7 @@ WebSocketsServer ws(81);
 DNSServer        dns;
 
 // Network defaults (used when nothing is stored, and after a gesture reset).
-#define DEF_AP_SSID "KineticSculpture"
+#define DEF_AP_SSID "Kinesthetic"
 #define DEF_AP_PASS "kinetic123"
 #define DEF_HOST    "sculpture"
 #define OTA_PASS    "kinetic"    // required by the IDE when uploading over WiFi
@@ -913,7 +916,9 @@ void onWsEvent(uint8_t n, WStype_t type, uint8_t *payload, size_t len) {
     // also sets direction. Auto modes take only the magnitude (their direction
     // is programmatic), so the slider behaves as a speed ceiling there.
     int pct = constrain((int)(d["v"] | 0), -100, 100);
-    int mag = map(abs(pct), 0, 100, 0, FREQ_MAX);
+    // 0% stops; 1..100% maps onto a genuinely moving range so the low end of the
+    // slider is not a dead zone (1-2% used to command < start speed).
+    int mag = (pct == 0) ? 0 : map(abs(pct), 1, 100, MANUAL_MIN_MOVE, FREQ_MAX);
     maxSpeedCeiling = mag;
     if (mode == MANUAL) {
       manualSpeed = (pct >= 0) ? mag : -mag;

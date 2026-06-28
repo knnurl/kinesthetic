@@ -12,7 +12,7 @@
 const char PAGE[] PROGMEM = R"rawliteral(
 <!DOCTYPE html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-<title>Kinetic</title><style>
+<title>Kinesthetic</title><style>
 :root{--h:210;--ink:#070a10;--mist:#dde3ef;--dim:#697287;--line:rgba(255,255,255,.09);--glass:rgba(10,13,20,.55)}
 *{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}
 html,body{height:100%}
@@ -65,9 +65,9 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
 </style></head><body>
 <canvas id="moire"></canvas>
 <div class="wrap">
-<div class="title">Kinetic</div>
+<div class="title">Kinesthetic</div>
 <div class="pills"><span id="conn" class="pill">offline</span>
-<span id="gs" class="pill">idle</span>
+<span id="gs" class="pill" style="display:none">idle</span>
 <span id="flt" class="pill">health ok</span>
 <span id="nip" class="pill">net</span></div>
 
@@ -102,6 +102,16 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
 </div>
 
 <div id="pm" style="display:none">
+ <div class="card">
+  <span class="eyebrow">Presets</span>
+  <label>One tap sets the feel, then save. Fine-tune below if you like.</label>
+  <div class="grid4" style="margin-top:10px">
+   <div class="chip" onclick="preset('calm')">Calm</div>
+   <div class="chip" onclick="preset('balanced')">Balanced</div>
+   <div class="chip" onclick="preset('lively')">Lively</div>
+   <div class="chip" onclick="preset('hypnotic')">Hypnotic</div>
+  </div>
+ </div>
  <div class="card">
   <span class="eyebrow">Cycle durations</span>
   <label>How long each auto mode takes to complete one cycle</label>
@@ -199,7 +209,7 @@ function connect(){
   act.textContent=t.speed+' st/s';
   mname.textContent=MODES[t.mode]||'-';
   mstate.textContent=t.enabled?(t.speed==0?'holding':'running'):'standby';
-  gs.textContent=t.gesture;gs.className='pill ok';
+  if(t.gesture=='idle'){gs.style.display='none';}else{gs.style.display='';gs.textContent=t.gesture.replace(/_/g,' ');gs.className='pill ok';}
   en=t.enabled;let eb=document.getElementById('en');eb.className='power'+(en?' on':'');eb.textContent=en?'Motor enabled':'Motor enable';
   for(let i=0;i<4;i++)document.getElementById('m'+i).className='chip'+(t.mode==i?' on':'');
   let f=t.fault||{};let bad=f.tmc||f.otp||f.tof;
@@ -240,6 +250,15 @@ function saveMotion(){
   qen:qen.checked,q:Q.map(s=>[s.m,s.s])};
  mnote.textContent='Saving...';cmd(o);
 }
+const PRESETS={
+ calm:{bms:34,sms:44,wms:64,up:0.9,dn:1.8,bsh:5,ssh:3.2},
+ balanced:{bms:20,sms:20,wms:28,up:0.5,dn:1.1,bsh:4,ssh:2.2},
+ lively:{bms:10,sms:10,wms:14,up:0.3,dn:0.6,bsh:3,ssh:1.8},
+ hypnotic:{bms:26,sms:16,wms:40,up:0.6,dn:0.9,bsh:6,ssh:2.6}
+};
+function preset(name){let p=PRESETS[name];if(!p)return;
+ bms.value=p.bms;sms.value=p.sms;wms.value=p.wms;up.value=p.up;dn.value=p.dn;bsh.value=p.bsh;ssh.value=p.ssh;
+ saveMotion();}
 const cv=document.getElementById('moire'),cx=cv.getContext('2d');
 const reduce=matchMedia('(prefers-reduced-motion:reduce)').matches;
 let pa=0,pb=0,dpr=Math.min(devicePixelRatio||1,2),raf;
