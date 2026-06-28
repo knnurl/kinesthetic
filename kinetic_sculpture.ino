@@ -57,6 +57,7 @@
 #include <DNSServer.h>
 #include <ArduinoOTA.h>
 #include <HTTPUpdate.h>
+#include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #endif
 
@@ -1014,28 +1015,61 @@ void loadNetSettings() {
 // Blocks while downloading; the motor is stopped first. On success the device
 // reboots inside update(); only failures return here. Needs internet (STA mode).
 void performOtaPull(const String &url) {
+  if (!useSta || WiFi.status() != WL_CONNECTED) {
+    // No upstream internet (AP mode or link down): a GitHub pull cannot work.
+    ws.broadcastTXT("{\"type\":\"fwstatus\",\"s\":\"failed\",\"m\":\"no internet - join your wifi first (Setup, Join wifi), then update from there\"}");
+    return;
+  }
   otaActive = true;
   motorEnabled = false;
   if (stepper) { stepper->forceStop(); stepper->disableOutputs(); }
   ws.broadcastTXT("{\"type\":\"fwstatus\",\"s\":\"downloading\"}");
   ws.loop();
-  Serial.printf("[ota] pulling %s\n", url.c_str());
+  Serial.printf("[ota] requested %s\n", url.c_str());
+
+  // Resolve redirects ourselves to the final asset URL. GitHub's download link
+  // 302-redirects to a signed CDN URL, and httpUpdate's own redirect following
+  // can drop the Content-Length there, failing with "server did not report
+  // size". Following it by hand and updating from the final URL avoids that.
+  String target = url;
+  if (url.startsWith("https")) {
+    for (int hop = 0; hop < 4; hop++) {
+      WiFiClientSecure rc; rc.setInsecure(); rc.setHandshakeTimeout(30);
+      HTTPClient h;
+      if (!h.begin(rc, target)) break;
+      h.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+      const char *keys[] = { "Location" };
+      h.collectHeaders(keys, 1);
+      int code = h.sendRequest("HEAD");
+      String loc = h.header("Location");
+      h.end();
+      if ((code == 301 || code == 302 || code == 303 || code == 307 || code == 308) && loc.length() > 0) {
+        target = loc;            // follow to the next hop
+      } else {
+        break;                   // final (non-redirect) response: target is the asset
+      }
+    }
+  }
+  Serial.printf("[ota] resolved %s\n", target.c_str());
 
   httpUpdate.rebootOnUpdate(true);
-  httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);   // GitHub redirects to a CDN
+  httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);   // belt and suspenders
   t_httpUpdate_return r;
-  if (url.startsWith("https")) {
-    WiFiClientSecure sc; sc.setInsecure();   // skip cert check (hobby device)
-    r = httpUpdate.update(sc, url);
+  if (target.startsWith("https")) {
+    WiFiClientSecure sc;
+    sc.setInsecure();              // skip cert check (hobby device)
+    sc.setHandshakeTimeout(30);    // C3 TLS handshake to GitHub's CDN can be slow
+    r = httpUpdate.update(sc, target);
   } else {
     WiFiClient c;
-    r = httpUpdate.update(c, url);
+    r = httpUpdate.update(c, target);
   }
 
   // Only reached if the update failed (success reboots).
   otaActive = false;
-  String msg = httpUpdate.getLastErrorString();
-  Serial.printf("[ota] failed (%d): %s\n", r, msg.c_str());
+  String msg = "code " + String((int)r) + ": " + httpUpdate.getLastErrorString()
+             + " (heap " + String(ESP.getFreeHeap()) + ")";
+  Serial.printf("[ota] failed %s\n", msg.c_str());
   String j = "{\"type\":\"fwstatus\",\"s\":\"failed\",\"m\":\"" + msg + "\"}";
   ws.broadcastTXT(j);
 }
