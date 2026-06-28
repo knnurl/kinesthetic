@@ -41,13 +41,14 @@ jobs:
 
       - name: Force INPUT_TOF_WIFI build flag
         run: |
+          sed -i 's/\r$//' kinetic_sculpture.ino       # normalize Windows CRLF endings
           sed -E -i \
             -e 's|^(// *)?#define INPUT_TOF$|// #define INPUT_TOF|' \
             -e 's|^(// *)?#define INPUT_POT_BTN$|// #define INPUT_POT_BTN|' \
             -e 's|^(// *)?#define INPUT_TOF_WIFI$|#define INPUT_TOF_WIFI|' \
             kinetic_sculpture.ino
           echo "Active build flags:"
-          grep -nE '^[^/]*#define INPUT_' kinetic_sculpture.ino
+          grep -nE '^[[:space:]]*#define INPUT_' kinetic_sculpture.ino || true
 
       - name: Arrange sketch folder
         run: |
