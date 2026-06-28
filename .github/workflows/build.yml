@@ -41,7 +41,7 @@ jobs:
 
       - name: Force INPUT_TOF_WIFI build flag
         run: |
-          sed -i 's/\r$//' kinetic_sculpture.ino       # normalize Windows CRLF endings
+          sed -i 's/\r$//' kinetic_sculpture.ino page.h   # normalize Windows CRLF endings
           sed -E -i \
             -e 's|^(// *)?#define INPUT_TOF$|// #define INPUT_TOF|' \
             -e 's|^(// *)?#define INPUT_POT_BTN$|// #define INPUT_POT_BTN|' \
@@ -53,19 +53,27 @@ jobs:
       - name: Arrange and inspect sketch
         run: |
           echo "== repo root =="; ls -la
-          echo "== sketch size =="; wc -l kinetic_sculpture.ino
-          op=$(grep -c 'R"rawliteral(' kinetic_sculpture.ino || true)
-          cl=$(grep -c ')rawliteral";' kinetic_sculpture.ino || true)
-          echo "== page raw-string wrapper: openers=$op closers=$cl (need 1 and 1) =="
+          test -f page.h || { echo "ERROR: page.h is missing from the repo root - upload it alongside the .ino"; exit 1; }
+          echo "== sizes =="; wc -l kinetic_sculpture.ino page.h
+          # The web page must live in page.h (with a valid raw-string wrapper) and
+          # must NOT be inline in the .ino (the Arduino ctags step breaks on that).
+          inoraw=$(grep -c 'R"rawliteral(' kinetic_sculpture.ino || true)
+          if [ "$inoraw" != "0" ]; then
+            echo "ERROR: kinetic_sculpture.ino contains a raw string literal. Move the web page to page.h."
+            exit 1
+          fi
+          op=$(grep -c 'R"rawliteral(' page.h || true)
+          cl=$(grep -c ')rawliteral";' page.h || true)
+          echo "== page.h raw-string wrapper: openers=$op closers=$cl (need 1 and 1) =="
           if [ "$op" != "1" ] || [ "$cl" != "1" ]; then
-            echo "ERROR: the web-page raw-string wrapper is broken. The kinetic_sculpture.ino"
-            echo "at the repo root is a corrupted copy - re-upload the clean downloaded file."
+            echo "ERROR: page.h raw-string wrapper is broken - re-upload the clean page.h."
             exit 1
           fi
           grep -nE 'void[[:space:]]+(setup|loop)[[:space:]]*\(\)' kinetic_sculpture.ino \
-            || { echo "ERROR: no setup()/loop() - wrong or empty file at repo root"; exit 1; }
+            || { echo "ERROR: no setup()/loop() - wrong or empty .ino at repo root"; exit 1; }
           mkdir -p sketch/kinetic_sculpture
           cp kinetic_sculpture.ino sketch/kinetic_sculpture/kinetic_sculpture.ino
+          cp page.h               sketch/kinetic_sculpture/page.h
 
       - name: Compile
         run: |
