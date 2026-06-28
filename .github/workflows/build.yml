@@ -50,10 +50,22 @@ jobs:
           echo "Active build flags:"
           grep -nE '^[[:space:]]*#define INPUT_' kinetic_sculpture.ino || true
 
-      - name: Arrange sketch folder
+      - name: Arrange and inspect sketch
         run: |
+          echo "== repo root =="; ls -la
+          echo "== sketch size =="; wc -l kinetic_sculpture.ino
+          op=$(grep -c 'R"rawliteral(' kinetic_sculpture.ino || true)
+          cl=$(grep -c ')rawliteral";' kinetic_sculpture.ino || true)
+          echo "== page raw-string wrapper: openers=$op closers=$cl (need 1 and 1) =="
+          if [ "$op" != "1" ] || [ "$cl" != "1" ]; then
+            echo "ERROR: the web-page raw-string wrapper is broken. The kinetic_sculpture.ino"
+            echo "at the repo root is a corrupted copy - re-upload the clean downloaded file."
+            exit 1
+          fi
+          grep -nE 'void[[:space:]]+(setup|loop)[[:space:]]*\(\)' kinetic_sculpture.ino \
+            || { echo "ERROR: no setup()/loop() - wrong or empty file at repo root"; exit 1; }
           mkdir -p sketch/kinetic_sculpture
-          cp kinetic_sculpture.ino sketch/kinetic_sculpture/
+          cp kinetic_sculpture.ino sketch/kinetic_sculpture/kinetic_sculpture.ino
 
       - name: Compile
         run: |
