@@ -58,6 +58,7 @@
 #include <ArduinoOTA.h>
 #include <HTTPUpdate.h>
 #include <HTTPClient.h>
+#include <Update.h>
 #include <WiFiClientSecure.h>
 #endif
 
@@ -1014,9 +1015,22 @@ void loadNetSettings() {
 // Pull a firmware .bin from a URL (e.g. a GitHub release) and self-install.
 // Blocks while downloading; the motor is stopped first. On success the device
 // reboots inside update(); only failures return here. Needs internet (STA mode).
+// Minimal Stream that forwards bytes straight into the OTA Update partition,
+// so a download can be streamed into flash even when the server uses chunked
+// transfer encoding and reports no Content-Length (which is what GitHub's asset
+// CDN does, and which the stock httpUpdate cannot handle).
+class OtaSink : public Stream {
+public:
+  size_t write(uint8_t b) override { return Update.write(&b, 1); }
+  size_t write(const uint8_t *buf, size_t n) override { return Update.write((uint8_t *)buf, n); }
+  int available() override { return 0; }
+  int read() override { return -1; }
+  int peek() override { return -1; }
+};
+
 void performOtaPull(const String &url) {
   if (!useSta || WiFi.status() != WL_CONNECTED) {
-    // No upstream internet (AP mode or link down): a GitHub pull cannot work.
+    // No upstream internet (AP mode or link down): a remote pull cannot work.
     ws.broadcastTXT("{\"type\":\"fwstatus\",\"s\":\"failed\",\"m\":\"no internet - join your wifi first (Setup, Join wifi), then update from there\"}");
     return;
   }
@@ -1025,53 +1039,49 @@ void performOtaPull(const String &url) {
   if (stepper) { stepper->forceStop(); stepper->disableOutputs(); }
   ws.broadcastTXT("{\"type\":\"fwstatus\",\"s\":\"downloading\"}");
   ws.loop();
-  Serial.printf("[ota] requested %s\n", url.c_str());
+  Serial.printf("[ota] pulling %s\n", url.c_str());
 
-  // Resolve redirects ourselves to the final asset URL. GitHub's download link
-  // 302-redirects to a signed CDN URL, and httpUpdate's own redirect following
-  // can drop the Content-Length there, failing with "server did not report
-  // size". Following it by hand and updating from the final URL avoids that.
-  String target = url;
-  if (url.startsWith("https")) {
-    for (int hop = 0; hop < 4; hop++) {
-      WiFiClientSecure rc; rc.setInsecure(); rc.setHandshakeTimeout(30);
-      HTTPClient h;
-      if (!h.begin(rc, target)) break;
-      h.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
-      const char *keys[] = { "Location" };
-      h.collectHeaders(keys, 1);
-      int code = h.sendRequest("HEAD");
-      String loc = h.header("Location");
-      h.end();
-      if ((code == 301 || code == 302 || code == 303 || code == 307 || code == 308) && loc.length() > 0) {
-        target = loc;            // follow to the next hop
-      } else {
-        break;                   // final (non-redirect) response: target is the asset
-      }
-    }
+  WiFiClientSecure sc;
+  WiFiClient cc;
+  HTTPClient http;
+  bool https = url.startsWith("https");
+  if (https) { sc.setInsecure(); sc.setHandshakeTimeout(30); http.begin(sc, url); }
+  else       { http.begin(cc, url); }
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);   // GitHub -> signed CDN
+  http.setTimeout(20000);
+
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) {
+    otaActive = false;
+    String m = "http " + String(code) + " (heap " + String(ESP.getFreeHeap()) + ")";
+    Serial.printf("[ota] %s\n", m.c_str());
+    http.end();
+    ws.broadcastTXT(String("{\"type\":\"fwstatus\",\"s\":\"failed\",\"m\":\"") + m + "\"}");
+    return;
   }
-  Serial.printf("[ota] resolved %s\n", target.c_str());
 
-  httpUpdate.rebootOnUpdate(true);
-  httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);   // belt and suspenders
-  t_httpUpdate_return r;
-  if (target.startsWith("https")) {
-    WiFiClientSecure sc;
-    sc.setInsecure();              // skip cert check (hobby device)
-    sc.setHandshakeTimeout(30);    // C3 TLS handshake to GitHub's CDN can be slow
-    r = httpUpdate.update(sc, target);
+  // getSize() is -1 when the response is chunked; UPDATE_SIZE_UNKNOWN handles that.
+  int len = http.getSize();
+  bool ok = Update.begin(len > 0 ? (size_t)len : UPDATE_SIZE_UNKNOWN);
+  if (ok) {
+    OtaSink sink;
+    int written = http.writeToStream(&sink);   // decodes chunked + content-length
+    ok = (written > 0) && Update.end(true) && Update.isFinished();
+  }
+  http.end();
+
+  if (ok) {
+    Serial.println("[ota] complete, rebooting");
+    ws.broadcastTXT("{\"type\":\"fwstatus\",\"s\":\"ok\"}");
+    ws.loop();
+    delay(300);
+    ESP.restart();
   } else {
-    WiFiClient c;
-    r = httpUpdate.update(c, target);
+    otaActive = false;
+    String m = String("write failed: ") + Update.errorString() + " (heap " + String(ESP.getFreeHeap()) + ")";
+    Serial.printf("[ota] %s\n", m.c_str());
+    ws.broadcastTXT(String("{\"type\":\"fwstatus\",\"s\":\"failed\",\"m\":\"") + m + "\"}");
   }
-
-  // Only reached if the update failed (success reboots).
-  otaActive = false;
-  String msg = "code " + String((int)r) + ": " + httpUpdate.getLastErrorString()
-             + " (heap " + String(ESP.getFreeHeap()) + ")";
-  Serial.printf("[ota] failed %s\n", msg.c_str());
-  String j = "{\"type\":\"fwstatus\",\"s\":\"failed\",\"m\":\"" + msg + "\"}";
-  ws.broadcastTXT(j);
 }
 
 void startServers() {
