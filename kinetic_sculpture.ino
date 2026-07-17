@@ -1285,7 +1285,7 @@ DNSServer        dns;
 #define DEF_AP_PASS "kinetic123"
 #define DEF_HOST    "sculpture"
 #define OTA_PASS    "kinetic"    // required by the IDE when uploading over WiFi
-#define FW_VERSION  "2.1.0"      // shown in the UI; bump on each release
+#define FW_VERSION  "2.1.2"      // shown in the UI; bump on each release
 
 // Loaded network settings + live status.
 String    apSsid, apPass, staSsid, staPass, hostName;
