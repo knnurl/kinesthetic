@@ -1285,7 +1285,7 @@ DNSServer        dns;
 #define DEF_AP_PASS "kinetic123"
 #define DEF_HOST    "sculpture"
 #define OTA_PASS    "kinetic"    // required by the IDE when uploading over WiFi
-#define FW_VERSION  "2.0.8"      // shown in the UI; bump on each release
+#define FW_VERSION  "2.1.0"      // shown in the UI; bump on each release
 
 // Loaded network settings + live status.
 String    apSsid, apPass, staSsid, staPass, hostName;
@@ -1531,8 +1531,23 @@ void loadNetSettings() {
 // CDN does, and which the stock httpUpdate cannot handle).
 class OtaSink : public Stream {
 public:
-  size_t write(uint8_t b) override { return Update.write(&b, 1); }
-  size_t write(const uint8_t *buf, size_t n) override { return Update.write((uint8_t *)buf, n); }
+  // Image-magic validation lives HERE, on the first dechunked byte, because
+  // this is the only layer that sees the actual payload. Peeking the raw TCP
+  // stream (the previous approach) reads chunked-encoding size lines and would
+  // reject even a valid image served chunked.
+  bool badMagic = false;
+  uint8_t firstByte = 0;
+  bool seen = false;
+  size_t write(uint8_t b) override { return write(&b, 1); }
+  size_t write(const uint8_t *buf, size_t n) override {
+    if (!seen && n) {
+      seen = true;
+      firstByte = buf[0];
+      if (firstByte != 0xE9) { badMagic = true; }
+    }
+    if (badMagic) return 0;   // abort writeToStream without touching flash
+    return Update.write((uint8_t *)buf, n);
+  }
   int available() override { return 0; }
   int read() override { return -1; }
   int peek() override { return -1; }
@@ -1590,33 +1605,30 @@ void performOtaPull(const String &url) {
     return;
   }
 
-  // Validate the ESP image magic BEFORE writing anything: if the server sent
-  // HTML or an error page, say so plainly instead of a cryptic decrypt error.
-  WiFiClient *st = http.getStreamPtr();
-  uint32_t tPeek = millis();
-  while (st && !st->available() && millis() - tPeek < 8000) { delay(10); }
-  int first = (st && st->available()) ? st->peek() : -1;
-  if (first != 0xE9) {
-    otaActive = false;
-    String ct = http.header("Content-Type");
-    String m = "not a firmware image (got " + (ct.length() ? ct : String("unknown type")) +
-               ", first byte 0x" + String(first, HEX) +
-               ") - the URL must be the raw firmware.bin release asset";
-    Serial.printf("[ota] %s\n", m.c_str());
-    http.end();
-    wsSendAll(String("{\"type\":\"fwstatus\",\"s\":\"failed\",\"m\":\"") + m + "\"}");
-    return;
-  }
 
   // getSize() is -1 when the response is chunked; UPDATE_SIZE_UNKNOWN handles that.
   int len = http.getSize();
+  OtaSink sink;
   bool ok = Update.begin(len > 0 ? (size_t)len : UPDATE_SIZE_UNKNOWN);
   if (ok) {
-    OtaSink sink;
     int written = http.writeToStream(&sink);   // decodes chunked + content-length
-    ok = (written > 0) && Update.end(true) && Update.isFinished();
+    ok = !sink.badMagic && (written > 0) && Update.end(true) && Update.isFinished();
   }
+  String finalCt = http.header("Content-Type");
   http.end();
+
+  if (sink.badMagic) {
+    Update.abort();
+    otaActive = false;
+    String m = "not a firmware image (server sent " +
+               (finalCt.length() ? finalCt : String("unknown type")) +
+               ", payload starts 0x" + String(sink.firstByte, HEX) +
+               "). The URL must be the raw .bin release asset, e.g. "
+               "/releases/download/latest/firmware.bin";
+    Serial.printf("[ota] %s\n", m.c_str());
+    wsSendAll(String("{\"type\":\"fwstatus\",\"s\":\"failed\",\"m\":\"") + m + "\"}");
+    return;
+  }
 
   if (ok) {
     Serial.println("[ota] complete, rebooting");

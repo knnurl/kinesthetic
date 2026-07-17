@@ -52,6 +52,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;heigh
 input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radius:50%;background:hsl(var(--h),85%,62%);box-shadow:0 0 22px hsla(var(--h),90%,60%,.85)}
 .ends{display:flex;justify-content:space-between}
 .ends span{font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim)}
+.stopbtn{border:1px solid var(--line);border-radius:99px;padding:4px 14px;color:var(--btntxt);background:var(--btn);cursor:pointer;margin-top:-3px;transition:.2s}
+.stopbtn:active{color:#fff;border-color:hsl(var(--h),85%,62%);box-shadow:0 0 14px hsla(var(--h),85%,55%,.4)}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
 .grid4{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
 .chip{font-family:ui-monospace,Menlo,monospace;font-size:12px;letter-spacing:.12em;text-transform:uppercase;border:1px solid var(--line);border-radius:12px;padding:13px 0;color:var(--btntxt);background:var(--btn);text-align:center;transition:.25s}
@@ -109,7 +111,7 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
  <div class="card">
   <div class="row"><label>Speed / Direction</label><span class="val" id="spv">stop</span></div>
   <input type="range" id="sp" min="-100" max="100" value="0" oninput="spShow(this.value)" onpointerdown="spDrag=true" onpointerup="spDrag=false" onchange="spDrag=false;lastSpSent=Date.now();const o={cmd:'speed',v:+this.value};cmd(o);if(fmir.checked)fleetSend(o)">
-  <div class="ends"><span>&#9664; reverse</span><span>stop</span><span>forward &#9654;</span></div>
+  <div class="ends"><span>&#9664; reverse</span><span class="stopbtn" onclick="spStop()">stop</span><span>forward &#9654;</span></div>
  </div>
  <div class="card">
   <div class="row"><label>Mode</label><div class="hbtn" onclick="showHelp()" title="What do these modes do?">?</div></div>
@@ -331,6 +333,7 @@ function ledSend(){lastLedSent=Date.now();const o={cmd:'led',m:LM,hue:+lhue.valu
 function loadLed(){api('/led').then(r=>r.json()).then(j=>{LM=j.m;lhue.value=j.hue;lbri.value=j.bri;lrt.value=j.rt;
  lhv.textContent=j.hue+'\u00b0';lbv.textContent=j.bri+'%';lrv.textContent=j.rt;
  for(let i=0;i<5;i++)document.getElementById('l'+i).className='chip'+(i==j.m?' on':'');ledLoaded=true;});}
+function spStop(){sp.value=0;spShow(0);lastSpSent=Date.now();const o={cmd:'speed',v:0};cmd(o);if(fmir.checked)fleetSend(o);}
 function spShow(v){v=+v;spv.textContent=v?((v>0?'+':'')+v+'% '+(v>0?'fwd':'rev')):'stop';}
 function tab(t){let p={c:pc,m:pm,l:pl,f:pf,n:pn,h:ph},b={c:tc,m:tm,l:tl,f:tf,n:tn,h:th};for(let k in p){p[k].style.display=k==t?'block':'none';b[k].className='tab'+(k==t?' on':'');}if(t=='n')loadNet();if(t=='m')loadMotion();if(t=='l'&&!ledLoaded)loadLed();if(t=='f'){renderFleet();for(let h of FP)fleetConnect(h);}}
 function boot(){flushQ();if(booted)return;booted=true;loadMotion();
