@@ -13,7 +13,19 @@ const char PAGE[] PROGMEM = R"rawliteral(
 <!DOCTYPE html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <title>Kinesthetic</title><style>
-:root{--h:210;--ink:#070a10;--mist:#dde3ef;--dim:#697287;--line:rgba(255,255,255,.09);--glass:rgba(10,13,20,.55)}
+:root{--h:210;--ink:#070a10;--mist:#e6ebf7;--dim:#8d96ad;--line:rgba(255,255,255,.17);
+--glass:rgba(16,20,30,.78);--btn:rgba(255,255,255,.07);--btntxt:#c3cbdf;
+--inputbg:rgba(255,255,255,.05);--mcard:rgba(16,20,30,.95);--scrim:rgba(4,6,10,.62)}
+html.light{--ink:#eef0f5;--mist:#1b2334;--dim:#5b6478;--line:rgba(15,25,50,.16);
+--glass:rgba(255,255,255,.82);--btn:rgba(15,25,50,.06);--btntxt:#3c465e;
+--inputbg:rgba(15,25,50,.05);--mcard:rgba(255,255,255,.96);--scrim:rgba(225,229,238,.66)}
+html.light #moire{opacity:.35}
+html.light .chip.on,html.light .power.on,html.light .tab.on,html.light .nbtn.on{color:hsl(var(--h),90%,30%)}
+html.light .pill.ok{color:hsl(var(--h),80%,36%)}
+html.light .read{color:hsl(var(--h),75%,38%)}
+html.light .mname{text-shadow:0 0 22px hsla(var(--h),90%,55%,.3)}
+html.light .qx{color:#b33;background:rgba(200,60,60,.08)}
+html.light .card{box-shadow:0 8px 32px rgba(30,40,70,.12)}
 *{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}
 html,body{height:100%}
 body{background:var(--ink);color:var(--mist);font-family:system-ui,-apple-system,sans-serif;overflow-x:hidden}
@@ -42,19 +54,19 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
 .ends span{font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim)}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
 .grid4{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
-.chip{font-family:ui-monospace,Menlo,monospace;font-size:12px;letter-spacing:.12em;text-transform:uppercase;border:1px solid var(--line);border-radius:12px;padding:13px 0;color:var(--dim);background:rgba(255,255,255,.02);text-align:center;transition:.25s}
+.chip{font-family:ui-monospace,Menlo,monospace;font-size:12px;letter-spacing:.12em;text-transform:uppercase;border:1px solid var(--line);border-radius:12px;padding:13px 0;color:var(--btntxt);background:var(--btn);text-align:center;transition:.25s}
 .chip.on{color:#fff;border-color:hsl(var(--h),85%,62%);background:hsla(var(--h),80%,55%,.16);box-shadow:0 0 22px hsla(var(--h),85%,55%,.35),inset 0 0 18px hsla(var(--h),85%,60%,.12)}
-.power{width:100%;font-family:ui-monospace,Menlo,monospace;font-size:14px;letter-spacing:.2em;text-transform:uppercase;border:1px solid var(--line);border-radius:14px;padding:16px;color:var(--dim);background:rgba(255,255,255,.02);transition:.25s}
+.power{width:100%;font-family:ui-monospace,Menlo,monospace;font-size:14px;letter-spacing:.2em;text-transform:uppercase;border:1px solid var(--line);border-radius:14px;padding:16px;color:var(--btntxt);background:var(--btn);transition:.25s}
 .power.on{color:#fff;border-color:hsl(var(--h),85%,62%);background:hsla(var(--h),80%,55%,.2);box-shadow:0 0 30px hsla(var(--h),85%,55%,.5),inset 0 0 24px hsla(var(--h),85%,60%,.15)}
-.ti{width:100%;padding:11px;margin-top:4px;border-radius:10px;border:1px solid var(--line);background:rgba(0,0,0,.35);color:var(--mist);font-size:14px;font-family:ui-monospace,Menlo,monospace}
+.ti{width:100%;padding:11px;margin-top:4px;border-radius:10px;border:1px solid var(--line);background:var(--inputbg);color:var(--mist);font-size:14px;font-family:ui-monospace,Menlo,monospace}
 .fr{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px}
 .fr .ti{width:96px;margin-top:0;text-align:right}
 .sub{color:var(--dim);font-size:12px;line-height:1.75}
-.nbtn{font-family:ui-monospace,Menlo,monospace;font-size:12px;letter-spacing:.1em;text-transform:uppercase;border:1px solid var(--line);border-radius:10px;padding:11px;color:var(--dim);background:rgba(255,255,255,.02);text-align:center}
+.nbtn{font-family:ui-monospace,Menlo,monospace;font-size:12px;letter-spacing:.1em;text-transform:uppercase;border:1px solid var(--line);border-radius:10px;padding:11px;color:var(--btntxt);background:var(--btn);text-align:center;cursor:pointer}
 .nbtn.on{color:#fff;border-color:hsl(var(--h),85%,62%);background:hsla(var(--h),80%,55%,.16)}
 .save{width:100%;margin-top:14px;font-family:ui-monospace,Menlo,monospace;letter-spacing:.15em;text-transform:uppercase;border:0;border-radius:12px;padding:13px;color:#06121f;font-weight:700;background:hsl(var(--h),85%,62%)}
 .qrow{display:flex;gap:8px;align-items:center;margin-top:8px}
-.qrow select,.qrow input{font-family:ui-monospace,Menlo,monospace;font-size:13px;padding:9px;border-radius:9px;border:1px solid var(--line);background:rgba(0,0,0,.35);color:var(--mist)}
+.qrow select,.qrow input{font-family:ui-monospace,Menlo,monospace;font-size:13px;padding:9px;border-radius:9px;border:1px solid var(--line);background:var(--inputbg);color:var(--mist)}
 .qrow select{flex:1}
 .qrow input{width:74px;text-align:right}
 .qx{border:1px solid var(--line);background:rgba(255,80,80,.08);color:#ff8a8a;border-radius:9px;padding:9px 12px;font-family:ui-monospace,monospace}
@@ -62,10 +74,10 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
 .sw{width:auto;flex:0 0 auto}
 .eyebrow{font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:hsl(var(--h),60%,68%);margin-bottom:4px;display:block}
 .chip,.tab,.power,.nbtn,.qx,.addq,.save,.sw{cursor:pointer}
-.hbtn{width:24px;height:24px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;border-radius:50%;border:1px solid var(--line);background:rgba(255,255,255,.03);color:var(--dim);font-family:ui-monospace,Menlo,monospace;font-size:12px;cursor:pointer;transition:.2s}
+.hbtn{width:24px;height:24px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;border-radius:50%;border:1px solid var(--line);background:var(--btn);color:var(--btntxt);font-family:ui-monospace,Menlo,monospace;font-size:12px;cursor:pointer;transition:.2s}
 .hbtn:hover,.hbtn:active{color:#fff;border-color:hsl(var(--h),85%,62%);box-shadow:0 0 14px hsla(var(--h),85%,55%,.4)}
-.mwrap{position:fixed;inset:0;z-index:9;display:flex;align-items:center;justify-content:center;padding:18px;background:rgba(4,6,10,.62);backdrop-filter:blur(8px)}
-.mcard{width:100%;max-width:420px;max-height:82vh;overflow:auto;background:rgba(12,16,24,.92);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 20px 70px rgba(0,0,0,.6)}
+.mwrap{position:fixed;inset:0;z-index:9;display:flex;align-items:center;justify-content:center;padding:18px;background:var(--scrim);backdrop-filter:blur(8px)}
+.mcard{width:100%;max-width:420px;max-height:82vh;overflow:auto;background:var(--mcard);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 20px 70px rgba(0,0,0,.45)}
 .mrow{padding:11px 0;border-bottom:1px solid var(--line)}
 .mrow:last-child{border-bottom:0}
 .mrow b{font-family:ui-monospace,Menlo,monospace;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--mist);display:block;margin-bottom:3px}
@@ -197,7 +209,7 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
    <div class="chip" onclick="fleetSend({cmd:'enable',v:true});cmd({cmd:'enable',v:true})">Enable all</div>
    <div class="chip" onclick="fleetSend({cmd:'enable',v:false});cmd({cmd:'enable',v:false})">Stop all</div>
   </div>
-  <button class="save" style="margin-top:10px" onclick="fleetSyncNow()">Send current mode + speed to all</button>
+  <button class="save" style="margin-top:10px;white-space:nowrap;font-size:12px" onclick="fleetSyncNow()">Send mode + speed to all</button>
   <div class="sub" id="fnote" style="margin-top:8px"></div>
  </div>
 </div>
@@ -227,6 +239,14 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
   <input id="host" class="ti">
   <button class="save" onclick="saveNet()">Save &amp; reboot</button>
   <div class="sub" id="note" style="margin-top:10px"></div>
+ </div>
+ <div class="card">
+  <span class="eyebrow">Appearance</span>
+  <div class="grid2">
+   <div class="nbtn" id="thD" onclick="setTheme('dark')">Dark</div>
+   <div class="nbtn" id="thL" onclick="setTheme('light')">Light</div>
+  </div>
+  <div class="sub" style="margin-top:8px">Saved on this device.</div>
  </div>
  <div class="card">
   <span class="eyebrow">Interface password</span>
@@ -322,6 +342,8 @@ function flushQ(){while(Q.length&&w&&w.readyState==1)w.send(JSON.stringify(Q.shi
 function doAuth(){lkerr.textContent='';if(w&&w.readyState==1)w.send(JSON.stringify({cmd:'auth',pw:lkpw.value}));}
 function setPass(p,noteEl){cmd({cmd:'setpass',pw:p||''});PW=p||'';if(PW)localStorage.ks_pw=PW;else localStorage.removeItem('ks_pw');
  if(noteEl)flash(noteEl,p?'Password set':'Password removed','');}
+function setTheme(t){document.documentElement.classList.toggle('light',t=='light');localStorage.ks_theme=t;
+ thD.className='nbtn'+(t=='dark'?' on':'');thL.className='nbtn'+(t=='light'?' on':'');}
 function welWifi(){welDone();tab('n');}
 function welPass(){if(!wpw.value)return;setPass(wpw.value,wpnote);}
 function welDone(){localStorage.ks_seen='1';wel.style.display='none';}
@@ -493,6 +515,7 @@ addEventListener('resize',()=>{resize();draw();});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)cancelAnimationFrame(raf);else if(!reduce)loop();});
 resize();draw();if(!reduce)loop();
 qen.onchange=markQueueRow;
+setTheme(localStorage.ks_theme=='light'?'light':'dark');
 fmir.checked=!!localStorage.ks_fmir;
 renderFleet();
 connect();   // boot() runs after the hello/auth handshake

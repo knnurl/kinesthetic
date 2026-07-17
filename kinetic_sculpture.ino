@@ -1285,7 +1285,7 @@ DNSServer        dns;
 #define DEF_AP_PASS "kinetic123"
 #define DEF_HOST    "sculpture"
 #define OTA_PASS    "kinetic"    // required by the IDE when uploading over WiFi
-#define FW_VERSION  "2.0.7"      // shown in the UI; bump on each release
+#define FW_VERSION  "2.0.8"      // shown in the UI; bump on each release
 
 // Loaded network settings + live status.
 String    apSsid, apPass, staSsid, staPass, hostName;
@@ -1551,19 +1551,57 @@ void performOtaPull(const String &url) {
   ws.loop();
   Serial.printf("[ota] pulling %s\n", url.c_str());
 
+  // Redirects are followed MANUALLY with a fresh connection per hop. GitHub
+  // now serves release assets via a ~1.4KB signed redirect (JWT query) to
+  // release-assets.githubusercontent.com; the stock HTTPClient auto-follow
+  // mishandled it and delivered the redirect's HTML body to Update, which
+  // failed with "Decryption error" (first byte not the 0xE9 image magic).
   WiFiClientSecure sc;
   WiFiClient cc;
   HTTPClient http;
-  bool https = url.startsWith("https");
-  if (https) { sc.setInsecure(); sc.setHandshakeTimeout(30); http.begin(sc, url); }
-  else       { http.begin(cc, url); }
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);   // GitHub -> signed CDN
-  http.setTimeout(20000);
-
-  int code = http.GET();
+  const char *hdrs[] = { "Location", "Content-Type" };
+  String cur = url;
+  int code = 0;
+  for (int hop = 0; hop < 6; hop++) {
+    bool https = cur.startsWith("https");
+    if (https) { sc.stop(); sc.setInsecure(); sc.setHandshakeTimeout(30); http.begin(sc, cur); }
+    else       { cc.stop(); http.begin(cc, cur); }
+    http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+    http.collectHeaders(hdrs, 2);
+    http.setTimeout(20000);
+    code = http.GET();
+    if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
+      String loc = http.header("Location");
+      http.end();
+      if (!loc.length()) { code = -100; break; }
+      Serial.printf("[ota] redirect %d -> %s\n", code, loc.substring(0, 80).c_str());
+      cur = loc;
+      continue;
+    }
+    break;
+  }
   if (code != HTTP_CODE_OK) {
     otaActive = false;
-    String m = "http " + String(code) + " (heap " + String(ESP.getFreeHeap()) + ")";
+    String m = (code == -100) ? "redirect without Location header"
+                              : "http " + String(code) + " (heap " + String(ESP.getFreeHeap()) + ")";
+    Serial.printf("[ota] %s\n", m.c_str());
+    http.end();
+    wsSendAll(String("{\"type\":\"fwstatus\",\"s\":\"failed\",\"m\":\"") + m + "\"}");
+    return;
+  }
+
+  // Validate the ESP image magic BEFORE writing anything: if the server sent
+  // HTML or an error page, say so plainly instead of a cryptic decrypt error.
+  WiFiClient *st = http.getStreamPtr();
+  uint32_t tPeek = millis();
+  while (st && !st->available() && millis() - tPeek < 8000) { delay(10); }
+  int first = (st && st->available()) ? st->peek() : -1;
+  if (first != 0xE9) {
+    otaActive = false;
+    String ct = http.header("Content-Type");
+    String m = "not a firmware image (got " + (ct.length() ? ct : String("unknown type")) +
+               ", first byte 0x" + String(first, HEX) +
+               ") - the URL must be the raw firmware.bin release asset";
     Serial.printf("[ota] %s\n", m.c_str());
     http.end();
     wsSendAll(String("{\"type\":\"fwstatus\",\"s\":\"failed\",\"m\":\"") + m + "\"}");
