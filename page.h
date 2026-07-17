@@ -61,6 +61,14 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
 .addq{width:100%;margin-top:10px;border:1px dashed var(--line);background:transparent;color:var(--dim);border-radius:10px;padding:11px;font-family:ui-monospace,monospace;letter-spacing:.1em;text-transform:uppercase;font-size:11px}
 .sw{width:auto;flex:0 0 auto}
 .eyebrow{font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:hsl(var(--h),60%,68%);margin-bottom:4px;display:block}
+.chip,.tab,.power,.nbtn,.qx,.addq,.save,.sw{cursor:pointer}
+.hbtn{width:24px;height:24px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;border-radius:50%;border:1px solid var(--line);background:rgba(255,255,255,.03);color:var(--dim);font-family:ui-monospace,Menlo,monospace;font-size:12px;cursor:pointer;transition:.2s}
+.hbtn:hover,.hbtn:active{color:#fff;border-color:hsl(var(--h),85%,62%);box-shadow:0 0 14px hsla(var(--h),85%,55%,.4)}
+.mwrap{position:fixed;inset:0;z-index:9;display:flex;align-items:center;justify-content:center;padding:18px;background:rgba(4,6,10,.62);backdrop-filter:blur(8px)}
+.mcard{width:100%;max-width:420px;max-height:82vh;overflow:auto;background:rgba(12,16,24,.92);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 20px 70px rgba(0,0,0,.6)}
+.mrow{padding:11px 0;border-bottom:1px solid var(--line)}
+.mrow:last-child{border-bottom:0}
+.mrow b{font-family:ui-monospace,Menlo,monospace;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--mist);display:block;margin-bottom:3px}
 @media(prefers-reduced-motion:reduce){.chip,.power,.tab{transition:none}}
 </style></head><body>
 <canvas id="moire"></canvas>
@@ -74,6 +82,8 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
 <div class="tabs">
  <div class="tab on" id="tc" onclick="tab('c')">Control</div>
  <div class="tab" id="tm" onclick="tab('m')">Motion</div>
+ <div class="tab" id="tl" onclick="tab('l')" style="display:none">Light</div>
+ <div class="tab" id="tf" onclick="tab('f')">Fleet</div>
  <div class="tab" id="tn" onclick="tab('n')">Setup</div>
  <div class="tab" id="th" onclick="tab('h')">Help</div>
 </div>
@@ -86,19 +96,31 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
  </div>
  <div class="card">
   <div class="row"><label>Speed / Direction</label><span class="val" id="spv">stop</span></div>
-  <input type="range" id="sp" min="-100" max="100" value="0" oninput="spShow(this.value)" onchange="cmd({cmd:'speed',v:+this.value})">
+  <input type="range" id="sp" min="-100" max="100" value="0" oninput="spShow(this.value)" onpointerdown="spDrag=true" onpointerup="spDrag=false" onchange="spDrag=false;lastSpSent=Date.now();const o={cmd:'speed',v:+this.value};cmd(o);if(fmir.checked)fleetSend(o)">
   <div class="ends"><span>&#9664; reverse</span><span>stop</span><span>forward &#9654;</span></div>
  </div>
  <div class="card">
-  <label>Mode</label>
+  <div class="row"><label>Mode</label><div class="hbtn" onclick="showHelp()" title="What do these modes do?">?</div></div>
   <div class="grid4">
-   <div class="chip" id="m0" onclick="cmd({cmd:'mode',v:0})">Manual</div>
-   <div class="chip" id="m1" onclick="cmd({cmd:'mode',v:1})">Breathe</div>
-   <div class="chip" id="m2" onclick="cmd({cmd:'mode',v:2})">Sweep</div>
-   <div class="chip" id="m3" onclick="cmd({cmd:'mode',v:3})">Wander</div>
+   <div class="chip" id="m0" onclick="modeCmd(0)">Manual</div>
+   <div class="chip" id="m1" onclick="modeCmd(1)">Breathe</div>
+   <div class="chip" id="m2" onclick="modeCmd(2)">Sweep</div>
+   <div class="chip" id="m3" onclick="modeCmd(3)">Wander</div>
+   <div class="chip" id="m4" onclick="modeCmd(4)">Tide</div>
+   <div class="chip" id="m5" onclick="modeCmd(5)">Pendulum</div>
+   <div class="chip" id="m6" onclick="modeCmd(6)">Heartbeat</div>
+   <div class="chip" id="m7" onclick="modeCmd(7)">Stutter</div>
   </div>
  </div>
  <div class="card"><div class="power" id="en" onclick="tgl()">Motor enable</div></div>
+ <div class="card">
+  <span class="eyebrow">Mode queue</span>
+  <div class="row"><label>Auto-play a sequence of modes</label><input id="qen" type="checkbox" class="sw"></div>
+  <div id="qlist"></div>
+  <button class="addq" onclick="addStep()">+ Add step</button>
+  <button class="save" onclick="saveMotion()">Apply queue</button>
+  <div class="sub" id="qnote" style="margin-top:8px">When on, the sculpture steps through this list and loops. It overrides manual mode selection.</div>
+ </div>
 </div>
 
 <div id="pm" style="display:none">
@@ -106,38 +128,78 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
   <span class="eyebrow">Presets</span>
   <label>One tap sets the feel, then save. Fine-tune below if you like.</label>
   <div class="grid4" style="margin-top:10px">
-   <div class="chip" onclick="preset('calm')">Calm</div>
-   <div class="chip" onclick="preset('balanced')">Balanced</div>
-   <div class="chip" onclick="preset('lively')">Lively</div>
-   <div class="chip" onclick="preset('hypnotic')">Hypnotic</div>
+   <div class="chip" id="p_calm" onclick="preset('calm')">Calm</div>
+   <div class="chip" id="p_balanced" onclick="preset('balanced')">Balanced</div>
+   <div class="chip" id="p_lively" onclick="preset('lively')">Lively</div>
+   <div class="chip" id="p_hypnotic" onclick="preset('hypnotic')">Hypnotic</div>
   </div>
  </div>
  <div class="card">
   <span class="eyebrow">Cycle durations</span>
   <label>How long each auto mode takes to complete one cycle</label>
-  <div class="fr"><label>Breathe period</label><input id="bms" class="ti" type="number" min="2" max="600"> </div>
-  <div class="fr"><label>Sweep period</label><input id="sms" class="ti" type="number" min="2" max="600"></div>
-  <div class="fr"><label>Wander pace</label><input id="wms" class="ti" type="number" min="4" max="300"></div>
-  <div class="sub" style="margin-top:6px">seconds</div>
+  <div class="fr"><label>Breathe period</label><input id="bms" class="ti" type="number" min="2" max="600" oninput="markPreset()"> </div>
+  <div class="fr"><label>Sweep period</label><input id="sms" class="ti" type="number" min="2" max="600" oninput="markPreset()"></div>
+  <div class="fr"><label>Wander pace</label><input id="wms" class="ti" type="number" min="4" max="300" oninput="markPreset()"></div>
+  <div class="fr"><label>Tide cycle (min)</label><input id="tmin" class="ti" type="number" min="1" max="60" oninput="markPreset()"></div>
+  <div class="fr"><label>Pendulum swing</label><input id="pms" class="ti" type="number" min="4" max="120" oninput="markPreset()"></div>
+  <div class="fr"><label>Heartbeat</label><input id="hbs" class="ti" type="number" min="2" max="20" oninput="markPreset()"></div>
+  <div class="fr"><label>Stutter step (ms)</label><input id="sts" class="ti" type="number" min="100" max="4000" step="50" oninput="markPreset()"></div>
+  <div class="sub" style="margin-top:6px">seconds, except tide (minutes) and stutter step (milliseconds)</div>
  </div>
  <div class="card">
   <span class="eyebrow">Speed profile</span>
   <label>How the motor eases between speeds, and how the curves dwell</label>
-  <div class="fr"><label>Ramp up</label><input id="up" class="ti" type="number" step="0.1" min="0.1" max="3"></div>
-  <div class="fr"><label>Wind down</label><input id="dn" class="ti" type="number" step="0.1" min="0.1" max="5"></div>
-  <div class="fr"><label>Breathe dwell</label><input id="bsh" class="ti" type="number" step="0.5" min="1" max="8"></div>
-  <div class="fr"><label>Sweep dwell</label><input id="ssh" class="ti" type="number" step="0.1" min="1" max="6"></div>
-  <div class="sub" style="margin-top:6px">ramp times in seconds, dwell is a curve sharpness</div>
- </div>
- <div class="card">
-  <span class="eyebrow">Mode queue</span>
-  <div class="row"><label>Auto-play a sequence of modes</label><input id="qen" type="checkbox" class="sw"></div>
-  <div id="qlist"></div>
-  <button class="addq" onclick="addStep()">+ Add step</button>
-  <div class="sub" style="margin-top:8px">When on, the sculpture steps through this list and loops. It overrides manual mode selection.</div>
+  <div class="fr"><label>Ramp up</label><input id="up" class="ti" type="number" step="0.1" min="0.1" max="3" oninput="markPreset()"></div>
+  <div class="fr"><label>Wind down</label><input id="dn" class="ti" type="number" step="0.1" min="0.1" max="5" oninput="markPreset()"></div>
+  <div class="fr"><label>Breathe dwell</label><input id="bsh" class="ti" type="number" step="0.5" min="1" max="8" oninput="markPreset()"></div>
+  <div class="fr"><label>Sweep dwell</label><input id="ssh" class="ti" type="number" step="0.1" min="1" max="6" oninput="markPreset()"></div>
+  <div class="fr"><label>Min auto speed</label><input id="flo" class="ti" type="number" min="0" max="1800"></div>
+  <div class="sub" style="margin-top:6px">ramp times in seconds, dwell is a curve sharpness. Min auto speed (st/s) is the slowest the auto modes are allowed to run; 0 lets them come to a complete stop.</div>
  </div>
  <button class="save" onclick="saveMotion()">Save motion settings</button>
  <div class="sub" id="mnote" style="margin-top:10px;text-align:center"></div>
+</div>
+
+<div id="pl" style="display:none">
+ <div class="card">
+  <label>Light mode</label>
+  <div class="grid4">
+   <div class="chip" id="l0" onclick="ledMode(0)">Off</div>
+   <div class="chip" id="l1" onclick="ledMode(1)">Solid</div>
+   <div class="chip" id="l2" onclick="ledMode(2)">Glow</div>
+   <div class="chip" id="l3" onclick="ledMode(3)">Chase</div>
+   <div class="chip" id="l4" onclick="ledMode(4)">Rainbow</div>
+  </div>
+  <div class="sub" style="margin-top:8px">Glow breathes with the sculpture's real speed. Chase spins with the discs, opposite ways on each ring. Rainbow drifts on its own, rings counter-flowing.</div>
+ </div>
+ <div class="card">
+  <div class="row"><label>Colour</label><span class="val" id="lhv">30&#176;</span></div>
+  <input type="range" id="lhue" min="0" max="359" value="30" style="background:linear-gradient(90deg,#f43,#fb0,#5d5,#3cc,#36f,#c3f,#f43)" oninput="lhv.textContent=this.value+'\u00b0';ledSend()">
+  <div class="row" style="margin-top:10px"><label>Brightness</label><span class="val" id="lbv">60%</span></div>
+  <input type="range" id="lbri" min="0" max="100" value="60" oninput="lbv.textContent=this.value+'%';ledSend()">
+  <div class="row" style="margin-top:10px"><label>Animation speed</label><span class="val" id="lrv">50</span></div>
+  <input type="range" id="lrt" min="1" max="100" value="50" oninput="lrv.textContent=this.value;ledSend()">
+  <div class="sub" style="margin-top:8px">Changes apply live and save automatically. Colour applies to Solid, Glow and Chase.</div>
+ </div>
+</div>
+
+<div id="pf" style="display:none">
+ <div class="card">
+  <span class="eyebrow">Fleet</span>
+  <div class="sub" style="margin:8px 0 12px">Command several sculptures from this one page. Add each one's address (e.g. <b>sculpture-3F2A.local</b> or its IP). If they share this sculpture's password, they unlock automatically.</div>
+  <div id="flist"></div>
+  <div class="row" style="margin-top:8px"><input class="ti" id="fhost" placeholder="sculpture-XXXX.local" style="flex:1;min-width:0" onkeydown="if(event.key=='Enter')fleetAdd()"><button class="nbtn" style="margin-left:8px" onclick="fleetAdd()">Add</button></div>
+ </div>
+ <div class="card">
+  <div class="row"><label>Mirror my controls to the fleet</label><input id="fmir" type="checkbox" class="sw" onchange="localStorage.ks_fmir=this.checked?'1':''"></div>
+  <div class="sub" style="margin:6px 0 12px">While on, every mode, speed, enable and light change you make here is sent to all connected sculptures too.</div>
+  <div class="grid4">
+   <div class="chip" onclick="fleetSend({cmd:'enable',v:true});cmd({cmd:'enable',v:true})">Enable all</div>
+   <div class="chip" onclick="fleetSend({cmd:'enable',v:false});cmd({cmd:'enable',v:false})">Stop all</div>
+  </div>
+  <button class="save" style="margin-top:10px" onclick="fleetSyncNow()">Send current mode + speed to all</button>
+  <div class="sub" id="fnote" style="margin-top:8px"></div>
+ </div>
 </div>
 
 <div id="pn" style="display:none">
@@ -167,6 +229,12 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
   <div class="sub" id="note" style="margin-top:10px"></div>
  </div>
  <div class="card">
+  <span class="eyebrow">Interface password</span>
+  <div class="sub" style="margin:8px 0 10px">Protects this control page. Leave blank and Save to remove it. The physical network-reset gesture also clears it.</div>
+  <input class="ti" id="supw" type="password" placeholder="New password (blank = none)" style="width:100%;box-sizing:border-box;margin-bottom:8px">
+  <button class="nbtn" onclick="setPass(supw.value)">Save password</button><span class="sub" id="spnote" style="margin-left:10px"></span>
+ </div>
+ <div class="card">
   <span class="eyebrow">Firmware</span>
   <div class="row"><label>Installed version</label><span class="val" id="fwver">-</span></div>
   <label style="margin-top:10px;display:block">Update from URL (a .bin, e.g. a GitHub release)</label>
@@ -181,7 +249,7 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
   <label style="display:block;margin-bottom:6px">Hand gestures (ToF sensor, hold still then withdraw)</label>
   <div class="sub">Move hand more than 3cm: speed control (closer = slower, bidirectional).<br>Hold still 2 to 5s, then withdraw: next mode.<br>Hold still 5 to 15s, then withdraw: enable / disable.<br>Hold still over 15s, then withdraw: reset network to the default access point.</div>
   <label style="display:block;margin:14px 0 6px">Modes</label>
-  <div class="sub">Manual: speed and direction follow your input.<br>Breathe: slow sinusoidal swell, lingers low.<br>Sweep: ramps up, eases through zero, reverses.<br>Wander: organic drifting speed and direction.</div>
+  <div class="sub">Manual: speed and direction follow your input.<br>Breathe: slow sinusoidal swell, lingers low.<br>Sweep: ramps up, eases through zero, reverses.<br>Wander: organic drifting speed and direction.<br>Tide: minutes-long swell, direction turns each cycle.<br>Pendulum: rocks to and fro, fastest mid-swing.<br>Heartbeat: pulse, echo, long rest.<br>Tap the ? in the mode grid for fuller descriptions.</div>
   <label style="display:block;margin:14px 0 6px">Status pills (top)</label>
   <div class="sub">Connection, current gesture state, health (turns red on overtemp, driver comms, or sensor fault), and the active network mode and address.</div>
   <label style="display:block;margin:14px 0 6px">Reaching the interface</label>
@@ -190,18 +258,93 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
 </div>
 </div>
 
+<div id="lock" class="mwrap" style="display:none;z-index:11">
+ <div class="mcard" style="max-width:340px">
+  <span class="eyebrow">Locked</span>
+  <div class="sub" style="margin:10px 0 14px">This sculpture is password protected. Enter the interface password to take control.</div>
+  <input class="ti" id="lkpw" type="password" placeholder="Password" style="width:100%;box-sizing:border-box" onkeydown="if(event.key=='Enter')doAuth()">
+  <div class="sub" id="lkerr" style="color:#f66;min-height:16px;margin:6px 0"></div>
+  <button class="save" onclick="doAuth()">Unlock</button>
+  <div class="sub" style="margin-top:10px">Forgotten? Hold your hand over the sensor 15s (or hold the reset button) to factory-reset network settings and clear the password.</div>
+ </div>
+</div>
+
+<div id="wel" class="mwrap" style="display:none;z-index:10">
+ <div class="mcard">
+  <span class="eyebrow">Welcome</span>
+  <div class="mrow"><b>What this is</b><div class="sub">Two coaxial discs counter-rotate to weave a living moir&eacute; pattern. This page is its remote control: it lives on the sculpture itself, nothing is sent to any cloud.</div></div>
+  <div class="mrow"><b>How to use it</b><div class="sub">The slider sets speed and direction. Pick a movement mode below it, or tap ? to read what each one does. The Mode queue plays modes in a timed sequence, and the Light tab drives the LED rings if fitted.</div></div>
+  <div class="mrow"><b>Join your WiFi</b><div class="sub" style="margin-bottom:8px">On your home network the sculpture can fetch wireless updates and be reached at its own address.</div>
+   <button class="nbtn" onclick="welWifi()">Open WiFi setup</button></div>
+  <div class="mrow"><b>Protect it (optional)</b><div class="sub" style="margin-bottom:8px">Set a password so only you can control it. Anyone on the same network can otherwise open this page.</div>
+   <input class="ti" id="wpw" type="password" placeholder="Choose a password" style="width:100%;box-sizing:border-box;margin-bottom:8px">
+   <button class="nbtn" onclick="welPass()">Set password</button><span class="sub" id="wpnote" style="margin-left:10px"></span></div>
+  <button class="save" style="margin-top:14px" onclick="welDone()">Start</button>
+ </div>
+</div>
+
+<div id="modal" class="mwrap" style="display:none" onclick="if(event.target===this)hideHelp()">
+ <div class="mcard">
+  <div class="row"><span class="eyebrow" style="margin:0">Movement modes</span><div class="qx" onclick="hideHelp()">&times;</div></div>
+  <div class="mrow"><b>Manual</b><div class="sub">You drive. The slider sets speed and direction directly; the sculpture holds whatever you set.</div></div>
+  <div class="mrow"><b>Breathe</b><div class="sub">A slow swell up to the set speed and back down, like breathing. Never stops; lingers at the quiet end. One direction.</div></div>
+  <div class="mrow"><b>Sweep</b><div class="sub">Ramps up to full speed, eases all the way down, then reverses. Slowest at each turn, so the pattern hangs at the reversal.</div></div>
+  <div class="mrow"><b>Wander</b><div class="sub">Organic drifting. Speed and direction meander unpredictably, like something alive idly exploring. Never repeats.</div></div>
+  <div class="mrow"><b>Tide</b><div class="sub">A very slow swell over minutes, turning direction each cycle like a tide. Made for long, ambient display; you rarely see it repeat.</div></div>
+  <div class="mrow"><b>Pendulum</b><div class="sub">Rocks to and fro. Fastest mid-swing, pausing gracefully at each extreme, the opposite feel to Sweep.</div></div>
+  <div class="mrow"><b>Heartbeat</b><div class="sub">A strong pulse, a softer echo, then a long rest. The rhythm reads as a heartbeat in the pattern.</div></div>
+  <div class="mrow"><b>Stutter</b><div class="sub">Steps between fixed speeds, holding each for a moment before jumping to the next, with the odd direction flip. A mechanical, clockwork character.</div></div>
+  <div class="mrow"><div class="sub">In every mode except Manual, the slider's distance from centre sets the top speed the movement builds to, and which side of centre sets its direction. The Mode queue below the enable button can play these in a timed sequence.</div></div>
+ </div>
+</div>
+
 <script>
-const MODES=['MANUAL','BREATHE','SWEEP','WANDER'],HUE=[210,165,280,35];
-let w,en=false,staMode=false,Q=[],St={speed:0,mode:0,en:false};
+const MODES=['MANUAL','BREATHE','SWEEP','WANDER','TIDE','PENDULUM','HEARTBEAT','STUTTER'],HUE=[210,165,280,35,195,320,355,55];
+// Q is the offline command queue. MQ is the mode queue playlist. They were one
+// variable, so opening the Motion tab clobbered any commands queued while offline.
+let w,en=false,staMode=false,Q=[],MQ=[],qi=-1,St={speed:0,mode:0,en:false};
+let LM=2,ledLoaded=false,ledSeen=false;
+let TK='',PW=localStorage.ks_pw||'',booted=false,spDrag=false,lastLedSent=0,lastMotionSave=0,lastSpSent=0;
+function api(u){return fetch(u+(TK?'?t='+TK:''))}
+function ledMode(m){LM=m;for(let i=0;i<5;i++)document.getElementById('l'+i).className='chip'+(i==m?' on':'');ledSend();}
+function ledSend(){lastLedSent=Date.now();const o={cmd:'led',m:LM,hue:+lhue.value,bri:+lbri.value,rt:+lrt.value};cmd(o);if(fmir.checked)fleetSend(o);}
+function loadLed(){api('/led').then(r=>r.json()).then(j=>{LM=j.m;lhue.value=j.hue;lbri.value=j.bri;lrt.value=j.rt;
+ lhv.textContent=j.hue+'\u00b0';lbv.textContent=j.bri+'%';lrv.textContent=j.rt;
+ for(let i=0;i<5;i++)document.getElementById('l'+i).className='chip'+(i==j.m?' on':'');ledLoaded=true;});}
 function spShow(v){v=+v;spv.textContent=v?((v>0?'+':'')+v+'% '+(v>0?'fwd':'rev')):'stop';}
-function tab(t){let p={c:pc,m:pm,n:pn,h:ph},b={c:tc,m:tm,n:tn,h:th};for(let k in p){p[k].style.display=k==t?'block':'none';b[k].className='tab'+(k==t?' on':'');}if(t=='n')loadNet();if(t=='m')loadMotion();}
+function tab(t){let p={c:pc,m:pm,l:pl,f:pf,n:pn,h:ph},b={c:tc,m:tm,l:tl,f:tf,n:tn,h:th};for(let k in p){p[k].style.display=k==t?'block':'none';b[k].className='tab'+(k==t?' on':'');}if(t=='n')loadNet();if(t=='m')loadMotion();if(t=='l'&&!ledLoaded)loadLed();if(t=='f'){renderFleet();for(let h of FP)fleetConnect(h);}}
+function boot(){flushQ();if(booted)return;booted=true;loadMotion();
+ if(!localStorage.ks_seen){wel.style.display='flex';}}
+// Flush queued commands only once the session is authorized; flushing in
+// onopen fired before the auth handshake, so every queued command bounced
+// off the gate with authfail and was lost.
+function flushQ(){while(Q.length&&w&&w.readyState==1)w.send(JSON.stringify(Q.shift()));}
+function doAuth(){lkerr.textContent='';if(w&&w.readyState==1)w.send(JSON.stringify({cmd:'auth',pw:lkpw.value}));}
+function setPass(p,noteEl){cmd({cmd:'setpass',pw:p||''});PW=p||'';if(PW)localStorage.ks_pw=PW;else localStorage.removeItem('ks_pw');
+ if(noteEl)flash(noteEl,p?'Password set':'Password removed','');}
+function welWifi(){welDone();tab('n');}
+function welPass(){if(!wpw.value)return;setPass(wpw.value,wpnote);}
+function welDone(){localStorage.ks_seen='1';wel.style.display='none';}
 function connect(){
  w=new WebSocket('ws://'+location.hostname+':81');
- w.onopen=()=>{conn.textContent='online';conn.className='pill ok'};
+ w.onopen=()=>{conn.textContent='online';conn.className='pill ok';};
  w.onclose=()=>{conn.textContent='offline';conn.className='pill';setTimeout(connect,1500)};
+ w.onerror=()=>{try{w.close();}catch(e){}};  // mobile sockets half-die; force a clean reconnect
  w.onmessage=e=>{const t=JSON.parse(e.data);
+  if(t.type=='hello'){
+   if(t.auth){if(PW){w.send(JSON.stringify({cmd:'auth',pw:PW}));}else{lock.style.display='flex';}}
+   else{TK=t.tok||'';lock.style.display='none';boot();}
+   return;}
+  if(t.type=='authok'){TK=t.tok||'';if(lkpw.value){PW=lkpw.value;localStorage.ks_pw=PW;}lock.style.display='none';lkpw.value='';boot();return;}
+  if(t.type=='authfail'){if(PW&&lock.style.display=='none'){PW='';localStorage.removeItem('ks_pw');}
+   lock.style.display='flex';lkerr.textContent=lkpw.value?'Wrong password':'';return;}
+  if(t.type=='passset'){flash(spnote,PW?'Password set':'Password removed','');return;}
+  if(t.type=='led'){if(Date.now()-lastLedSent>1200){LM=t.m;lhue.value=t.hue;lbri.value=t.bri;lrt.value=t.rt;
+   lhv.textContent=t.hue+'\u00b0';lbv.textContent=t.bri+'%';lrv.textContent=t.rt;
+   for(let i=0;i<5;i++)document.getElementById('l'+i).className='chip'+(i==t.m?' on':'');}return;}
   if(t.type=='netsaved'){note.textContent='Saved. Rebooting. Reconnect to your network, then open '+host.value+'.local';return;}
-  if(t.type=='motionsaved'){mnote.textContent='Saved and applied';return;}
+  if(t.type=='motionsaved'){flash(mnote,'Saved and applied','');flash(qnote,'Saved and applied',QHELP);if(Date.now()-lastMotionSave>1200)setTimeout(loadMotion,300);return;}
+  if(t.type=='queueoff'){qen.checked=false;qi=-1;markQueueRow();flash(qnote,'Queue stopped: a mode was chosen directly',QHELP);return;}
   if(t.type=='fwstatus'){fwnote.textContent=t.s=='downloading'?'Downloading and installing, do not power off...':('Update failed: '+(t.m||'')); return;}
   if(t.type!='tele')return;
   St.speed=t.speed;St.mode=t.mode;St.en=t.enabled;
@@ -211,7 +354,10 @@ function connect(){
   mstate.textContent=t.enabled?(t.speed==0?'holding':'running'):'standby';
   if(t.gesture=='idle'){gs.style.display='none';}else{gs.style.display='';gs.textContent=t.gesture.replace(/_/g,' ');gs.className='pill ok';}
   en=t.enabled;let eb=document.getElementById('en');eb.className='power'+(en?' on':'');eb.textContent=en?'Motor enabled':'Motor enable';
-  for(let i=0;i<4;i++)document.getElementById('m'+i).className='chip'+(t.mode==i?' on':'');
+  for(let i=0;i<MODES.length;i++)document.getElementById('m'+i).className='chip'+(t.mode==i?' on':'');
+  if(t.qi!==qi){qi=t.qi;markQueueRow();}
+  if(t.leds&&!ledSeen){ledSeen=true;tl.style.display='';loadLed();}
+  if(t.sl!==undefined&&!spDrag&&Date.now()-lastSpSent>1200&&document.activeElement!==sp&&+sp.value!==t.sl){sp.value=t.sl;spShow(t.sl);}
   let f=t.fault||{};let bad=f.tmc||f.otp||f.tof;
   flt.textContent=f.tmc?'TMC comm':f.otp?('OVERTEMP '+t.derate+'%'):f.tof?'ToF fault':'health ok';
   flt.className=bad?'pill bad':'pill ok';
@@ -219,11 +365,50 @@ function connect(){
   if(reduce)draw();
  };
 }
-function cmd(o){if(w&&w.readyState==1)w.send(JSON.stringify(o))}
-function tgl(){cmd({cmd:'enable',v:!en})}
+function cmd(o){
+ if(w&&w.readyState==1){w.send(JSON.stringify(o));return;}
+ Q=Q.filter(x=>x.cmd!=o.cmd);Q.push(o);  // coalesce: keep only the newest of each cmd
+ if(Q.length>12)Q.shift();               // bound the backlog
+}
+function modeCmd(v){const o={cmd:'mode',v:v};cmd(o);if(fmir.checked)fleetSend(o);}
+function tgl(){const o={cmd:'enable',v:!en};cmd(o);if(fmir.checked)fleetSend(o);}
+
+// ---------- Fleet: command several sculptures from this page ----------
+// Peers live in localStorage on this phone; sockets are plain extra WebSockets
+// to each peer's :81. Peers protected with the same password unlock with it.
+let FP=JSON.parse(localStorage.ks_fleet||'[]'),FS={},FST={};
+function fleetSave(){localStorage.ks_fleet=JSON.stringify(FP);}
+function fleetAdd(){let h=fhost.value.trim();if(!h||FP.includes(h))return;FP.push(h);fhost.value='';fleetSave();renderFleet();fleetConnect(h);}
+function fleetDel(i){let h=FP[i];FP.splice(i,1);fleetSave();try{FS[h]&&FS[h].close();}catch(e){}delete FS[h];delete FST[h];renderFleet();}
+function fleetConnect(h){
+ if(FS[h]&&FS[h].readyState<2)return;
+ FST[h]=0;renderFleet();
+ let sk;try{sk=new WebSocket('ws://'+h+':81');}catch(e){return;}
+ FS[h]=sk;
+ sk.onopen=()=>{FST[h]=1;renderFleet();};
+ sk.onclose=()=>{FST[h]=0;renderFleet();};
+ sk.onerror=()=>{try{sk.close();}catch(e){}};
+ sk.onmessage=e=>{let t;try{t=JSON.parse(e.data);}catch(x){return;}
+  if(t.type=='hello'){if(t.auth){sk.send(JSON.stringify({cmd:'auth',pw:PW}));}else{FST[h]=2;renderFleet();}return;}
+  if(t.type=='authok'){FST[h]=2;renderFleet();return;}
+  if(t.type=='authfail'){FST[h]=3;renderFleet();return;}};
+}
+function renderFleet(){let html='';FP.forEach((h,i)=>{
+ let st=FST[h]||0,col=st==2?'#4c8':st==1?'#cc4':st==3?'#f66':'#666',
+     lbl=st==2?'ready':st==1?'connecting':st==3?'locked (wrong password)':'offline';
+ html+='<div class="row" style="padding:7px 0;border-bottom:1px solid var(--line)">'
+  +'<span style="width:9px;height:9px;border-radius:50%;background:'+col+';box-shadow:0 0 8px '+col+';flex:0 0 auto;margin-right:10px"></span>'
+  +'<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+h+' <span class="sub">'+lbl+'</span></span>'
+  +'<div class="qx" onclick="fleetDel('+i+')">&times;</div></div>';});
+ flist.innerHTML=html||'<div class="sub">No sculptures added yet.</div>';}
+function fleetSend(o){let n=0;for(let h of FP){let sk=FS[h];if(sk&&sk.readyState==1&&FST[h]==2){sk.send(JSON.stringify(o));n++;}}
+ if(fnote)flash(fnote,n?('Sent to '+n+' sculpture'+(n>1?'s':'')):'No connected sculptures','');return n;}
+function fleetSyncNow(){fleetSend({cmd:'mode',v:St.mode});fleetSend({cmd:'speed',v:+sp.value});}
+setInterval(()=>{for(let h of FP){if(!FS[h]||FS[h].readyState>=2)fleetConnect(h);}},8000);
+
 function setSta(v){staMode=v;document.getElementById('nmSta').className='nbtn'+(v?' on':'');document.getElementById('nmAp').className='nbtn'+(v?'':' on');staF.style.display=v?'block':'none';apF.style.display=v?'none':'block';}
 function updS(){stF.style.display=us.checked?'block':'none';}
-function loadNet(){fetch('/net').then(r=>r.json()).then(j=>{
+function loadNet(){api('/net').then(r=>r.json()).then(j=>{
  ssid.value=j.ssid;apssid.value=j.apssid;apip.value=j.apip;host.value=j.host;
  ip.value=j.ip;gw.value=j.gw;mask.value=j.mask;us.checked=j.static;updS();setSta(j.sta);
  fwver.textContent=j.fwver||'-';fwurl.value=j.fwurl||'';
@@ -235,30 +420,46 @@ function saveNet(){
  if(pass.value)o.pass=pass.value;if(appass.value)o.appass=appass.value;
  note.textContent='Saving...';cmd(o);
 }
-function renderQueue(){let h='';Q.forEach((s,i)=>{
+function markQueueRow(){MQ.forEach((s,i)=>{let r=document.getElementById('qr'+i);
+ if(r)r.style.borderColor=(i===qi&&qen.checked)?'hsl(var(--h),85%,62%)':'';});}
+function renderQueue(){let h='';MQ.forEach((s,i)=>{
  let opts=MODES.map((m,k)=>'<option value="'+k+'"'+(k==s.m?' selected':'')+'>'+m+'</option>').join('');
- h+='<div class="qrow"><select onchange="Q['+i+'].m=+this.value"> '+opts+'</select>'
-  +'<input type="number" min="1" max="3600" value="'+s.s+'" onchange="Q['+i+'].s=+this.value"><div class="qx" onclick="delStep('+i+')">&times;</div></div>';});
- qlist.innerHTML=h;}
-function addStep(){if(Q.length<8){Q.push({m:1,s:60});renderQueue();}}
-function delStep(i){Q.splice(i,1);renderQueue();}
-function loadMotion(){fetch('/motion').then(r=>r.json()).then(j=>{
- bms.value=j.bms;sms.value=j.sms;wms.value=j.wms;up.value=j.up;dn.value=j.dn;bsh.value=j.bsh;ssh.value=j.ssh;
- qen.checked=j.qen;Q=(j.q||[]).map(a=>({m:a[0],s:a[1]}));renderQueue();});}
+ h+='<div class="qrow" id="qr'+i+'" style="border:1px solid transparent;border-radius:10px;padding:2px;transition:.25s"><select onchange="MQ['+i+'].m=+this.value"> '+opts+'</select>'
+  +'<input type="number" min="1" max="3600" value="'+s.s+'" onchange="MQ['+i+'].s=+this.value"><div class="qx" onclick="delStep('+i+')">&times;</div></div>';});
+ qlist.innerHTML=h;markQueueRow();}
+function addStep(){if(MQ.length<8){MQ.push({m:1,s:60});renderQueue();}}
+function delStep(i){MQ.splice(i,1);renderQueue();}
+function loadMotion(){api('/motion').then(r=>r.json()).then(j=>{
+ bms.value=j.bms;sms.value=j.sms;wms.value=j.wms;tmin.value=j.tmin;pms.value=j.pms;hbs.value=j.hbs;sts.value=j.sts;
+ up.value=j.up;dn.value=j.dn;bsh.value=j.bsh;ssh.value=j.ssh;flo.value=j.flo;
+ qen.checked=j.qen;MQ=(j.q||[]).map(a=>({m:a[0],s:a[1]}));renderQueue();markPreset();});}
 function saveMotion(){
- let o={cmd:'motion',bms:+bms.value,sms:+sms.value,wms:+wms.value,up:+up.value,dn:+dn.value,bsh:+bsh.value,ssh:+ssh.value,
-  qen:qen.checked,q:Q.map(s=>[s.m,s.s])};
- mnote.textContent='Saving...';cmd(o);
+ let o={cmd:'motion',bms:+bms.value,sms:+sms.value,wms:+wms.value,tmin:+tmin.value,pms:+pms.value,hbs:+hbs.value,sts:+sts.value,
+  up:+up.value,dn:+dn.value,bsh:+bsh.value,ssh:+ssh.value,flo:+flo.value,
+  qen:qen.checked,q:MQ.map(s=>[s.m,s.s])};
+ mnote.textContent='Saving...';qnote.textContent='Saving...';lastMotionSave=Date.now();cmd(o);
 }
+function showHelp(){modal.style.display='flex';}
+function hideHelp(){modal.style.display='none';}
+addEventListener('keydown',e=>{if(e.key=='Escape')hideHelp();});
 const PRESETS={
- calm:{bms:34,sms:44,wms:64,up:0.9,dn:1.8,bsh:5,ssh:3.2},
- balanced:{bms:20,sms:20,wms:28,up:0.5,dn:1.1,bsh:4,ssh:2.2},
- lively:{bms:10,sms:10,wms:14,up:0.3,dn:0.6,bsh:3,ssh:1.8},
- hypnotic:{bms:26,sms:16,wms:40,up:0.6,dn:0.9,bsh:6,ssh:2.6}
+ calm:{bms:34,sms:44,wms:64,tmin:14,pms:22,hbs:6,sts:1400,up:0.9,dn:1.8,bsh:5,ssh:3.2},
+ balanced:{bms:20,sms:20,wms:28,tmin:8,pms:12,hbs:4,sts:900,up:0.5,dn:1.1,bsh:4,ssh:2.2},
+ lively:{bms:10,sms:10,wms:14,tmin:4,pms:7,hbs:3,sts:450,up:0.3,dn:0.6,bsh:3,ssh:1.8},
+ hypnotic:{bms:26,sms:16,wms:40,tmin:10,pms:16,hbs:5,sts:700,up:0.6,dn:0.9,bsh:6,ssh:2.6}
 };
+// Show a transient status in a note element, then restore its resting text.
+const QHELP='When on, the sculpture steps through this list and loops. It overrides manual mode selection.';
+function flash(el,msg,rest){el.textContent=msg;clearTimeout(el._t);el._t=setTimeout(()=>{el.textContent=rest;},4000);}
+function markPreset(){for(const k in PRESETS){const p=PRESETS[k];
+ const hit=(+bms.value==p.bms&&+sms.value==p.sms&&+wms.value==p.wms&&+tmin.value==p.tmin
+  &&+pms.value==p.pms&&+hbs.value==p.hbs&&+sts.value==p.sts&&+up.value==p.up
+  &&+dn.value==p.dn&&+bsh.value==p.bsh&&+ssh.value==p.ssh);
+ document.getElementById('p_'+k).className='chip'+(hit?' on':'');}}
 function preset(name){let p=PRESETS[name];if(!p)return;
- bms.value=p.bms;sms.value=p.sms;wms.value=p.wms;up.value=p.up;dn.value=p.dn;bsh.value=p.bsh;ssh.value=p.ssh;
- saveMotion();}
+ bms.value=p.bms;sms.value=p.sms;wms.value=p.wms;tmin.value=p.tmin;pms.value=p.pms;hbs.value=p.hbs;sts.value=p.sts;
+ up.value=p.up;dn.value=p.dn;bsh.value=p.bsh;ssh.value=p.ssh;
+ markPreset();saveMotion();}
 const cv=document.getElementById('moire'),cx=cv.getContext('2d');
 const reduce=matchMedia('(prefers-reduced-motion:reduce)').matches;
 let pa=0,pb=0,dpr=Math.min(devicePixelRatio||1,2),raf;
@@ -276,7 +477,7 @@ function disc(x,y,ri,ro,ph,hue,al){
 function draw(){
  const ww=cv.width,hh=cv.height,x=ww/2,y=hh*0.42,ro=Math.hypot(ww,hh)*0.55,ri=ro*0.06;
  cx.clearRect(0,0,ww,hh);
- let v=Math.max(-1,Math.min(1,St.speed/4000));
+ let v=Math.max(-1,Math.min(1,St.speed/1800));  // matches firmware FREQ_MAX
  if(!reduce){pa+=v*0.05;pb-=v*0.05;}
  let hue=HUE[St.mode]||210,al=(St.en?1:0.28);
  cx.globalCompositeOperation='lighter';
@@ -291,6 +492,9 @@ function loop(){draw();raf=requestAnimationFrame(loop);}
 addEventListener('resize',()=>{resize();draw();});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)cancelAnimationFrame(raf);else if(!reduce)loop();});
 resize();draw();if(!reduce)loop();
-connect();
+qen.onchange=markQueueRow;
+fmir.checked=!!localStorage.ks_fmir;
+renderFleet();
+connect();   // boot() runs after the hello/auth handshake
 </script></body></html>
 )rawliteral";

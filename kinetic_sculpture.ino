@@ -27,6 +27,16 @@
 // #define INPUT_POT_BTN
 #define INPUT_TOF_WIFI
 
+// Optional WS2812 ring lighting. Comment out to build without LEDs; the LED
+// tab in the web app hides itself automatically when the firmware lacks it.
+#define ENABLE_LEDS
+
+#ifdef ENABLE_LEDS
+#define LEDS_JSON "true"
+#else
+#define LEDS_JSON "false"
+#endif
+
 #if (defined(INPUT_POT_BTN) + defined(INPUT_TOF) + defined(INPUT_TOF_WIFI)) != 1
 #error "Define exactly one input mode: INPUT_POT_BTN, INPUT_TOF, or INPUT_TOF_WIFI"
 #endif
@@ -43,6 +53,10 @@
 #include "FastAccelStepper.h"
 #include <TMCStepper.h>
 #include <Preferences.h>   // NVS persistence of mode + ceiling
+
+#ifdef ENABLE_LEDS
+#include <Adafruit_NeoPixel.h>
+#endif
 
 #ifdef USES_TOF
 #include <Wire.h>
@@ -84,13 +98,35 @@ const int SDA_PIN = 1;     // ToF10120 I2C data
 const int SCL_PIN = 3;     // ToF10120 I2C clock
 #endif
 
+#ifdef ENABLE_LEDS
+// HARDWARE NOTE: the ESP32-C3 has only two RMT TX channels and FastAccelStepper
+// claims one for step generation, leaving exactly one for WS2812 output. Two
+// separate LED data pins therefore cannot work on this chip alongside the
+// stepper. Chain ring B's DIN to ring A's DOUT and drive the whole chain from
+// GPIO20; the rings remain independently addressable as segments. GPIO21 is
+// intentionally unused.
+const int LED_PIN = 20;
+#define LED_COUNT_A 24     // ring A pixel count (first in the chain)
+#define LED_COUNT_B 24     // ring B pixel count (chained after A)
+#define LED_COUNT   (LED_COUNT_A + LED_COUNT_B)
+#endif
+
 // ============================================================
 //  CONSTANTS
 // ============================================================
-#define FREQ_MIN   100      // steps/sec, below this the motor is treated as stopped
-#define FREQ_MAX   4000     // steps/sec maximum
-#define MANUAL_MIN_MOVE 200 // steps/sec the slider's lowest non-zero step maps to,
-                            // so even 1% produces real motion (no dead low end)
+#define FREQ_MIN   8        // steps/sec, below this the motor is treated as stopped.
+                            // Was 100, which silently discarded the whole 0-100 st/s
+                            // band while telemetry still displayed it. TMC2209 in
+                            // StealthChop with intpol handles single-digit rates fine.
+#define FREQ_MAX   1800     // steps/sec maximum. Was 4000; observed usable top
+                            // speed is 45% of that, so the range is clamped and
+                            // every ceiling-relative mapping rescales with it.
+#define MANUAL_MIN_MOVE (FREQ_MIN + 2) // steps/sec at the slider's lowest non-zero
+                            // step, so even 1% produces real motion (no dead low
+                            // end). Tied to FREQ_MIN so it can never fall back
+                            // under the stop threshold if that changes again;
+                            // it was a stale hardcoded 200 from the FREQ_MIN=100
+                            // era, which made 1% far faster than it needed to be.
 #define SMOOTH_TIME_UP   0.5f   // sec, responsiveness when speeding up (lower = snappier)
 #define SMOOTH_TIME_DOWN 1.1f   // sec, when slowing down (higher = gentler wind down)
 #define MAX_ACCEL  10000    // steps/sec^2, hard ceiling on rate of change
@@ -100,7 +136,9 @@ const int SCL_PIN = 3;     // ToF10120 I2C clock
 // sculpture always keeps visibly moving and cannot be starved to a standstill by
 // the ToF, pot, or app. MANUAL is exempt and keeps its full range including stop.
 // Kept above FREQ_MIN / 0.15 so BREATHE's trough (0.15 x ceiling) never stalls.
-#define MODE_MIN_SPEED 700  // steps/sec
+#define MODE_MIN_SPEED 120  // steps/sec, default floor for the auto modes. Keeps
+                            // their quiet phases visibly alive; every mode trough
+                            // (tide's 8% is the lowest) still clears FREQ_MIN.
 
 // Envelope shaping for the autonomous modes. Higher values make the speed
 // profile linger longer at the low end (BREATHE) and around the zero crossing
@@ -112,6 +150,10 @@ const int SCL_PIN = 3;     // ToF10120 I2C clock
 #define BREATHE_PERIOD_MS 20000   // one full breath in/out
 #define SWEEP_HALF_MS     10000   // one ramp 0 -> peak (a full sweep is 2x this)
 #define WANDER_RATE       0.0005f // time scale for the noise drift (lower = slower)
+#define TIDE_PERIOD_MS    480000  // one full tide swell (8 min); direction alternates per cycle
+#define PEND_PERIOD_MS    12000   // one full pendulum swing there and back
+#define BEAT_PERIOD_MS    4000    // one heartbeat (lub-dub + rest)
+#define STUT_PERIOD_MS    900     // base dwell per stutter step (varies 0.5x-1.5x)
 
 #define STEPS_PER_REV 3200  // 200 full steps x 16 microsteps  (informational)
 const float E_CONST = 2.718281828f;
@@ -142,15 +184,27 @@ FastAccelStepper *stepper = NULL;
 enum Mode : uint8_t { MANUAL = 0, BREATHE = 1, SWEEP = 2, WANDER = 3 };
 uint8_t mode = MANUAL;
 
-int  currFreq = 0;          // signed steps/sec actually applied
+int  currFreq = 0;          // signed steps/sec, smoothed tracker output
+int  appliedFreq = 0;       // signed steps/sec actually commanded to the stepper
+                            // (0 whenever the FREQ_MIN cutoff holds it still), so
+                            // telemetry never shows motion that is not happening
 int  targetFreq = 0;        // signed steps/sec requested this tick
 bool motorEnabled = false;  // tracked driver enable state
 
 float trackPos = 0.0f;      // smoothed signed frequency (tracker output)
 float trackVel = 0.0f;      // tracker velocity state
+uint32_t softStartAt = 0;   // millis of the enable edge; 0 = not soft-starting
+uint32_t enableGraceUntil = 0; // gentler speed ramp until this time after enable
+uint8_t  softStage = 0;
 
-int  maxSpeedCeiling = FREQ_MAX;  // ToF/pot set ceiling for BREATHE/SWEEP/WANDER
+int  maxSpeedCeiling = 0;         // ToF/pot/app set this ceiling for the auto modes.
+                                  // Defaults to 0 (slider at rest) so an out-of-box
+                                  // unit cannot launch at full speed on first enable;
+                                  // auto modes still animate via the min-speed floor.
 int  manualSpeed = 0;             // signed, frozen between MANUAL speed gestures
+int  lastSliderPct = 0;           // exact percent last sent by the app; echoed back
+                                  // verbatim in telemetry so integer map() rounding
+                                  // cannot nudge other clients' sliders by 1%
 int  lastManualDir = 1;           // +1 or -1, inherited by BREATHE
 
 // Health / fault flags, surfaced to Serial, telemetry, and the response logic.
@@ -170,10 +224,15 @@ struct MotionCfg {
   uint32_t breatheMs   = BREATHE_PERIOD_MS;
   uint32_t sweepHalfMs = SWEEP_HALF_MS;
   float    wanderRate  = WANDER_RATE;
+  uint32_t tideMs      = TIDE_PERIOD_MS;
+  uint32_t pendMs      = PEND_PERIOD_MS;
+  uint32_t beatMs      = BEAT_PERIOD_MS;
+  uint32_t stutMs      = STUT_PERIOD_MS;
   float    smoothUp    = SMOOTH_TIME_UP;
   float    smoothDown  = SMOOTH_TIME_DOWN;
   float    breatheShape= BREATHE_SHAPE;
   float    sweepShape  = SWEEP_SHAPE;
+  int      minSpeed    = MODE_MIN_SPEED;  // runtime floor for auto modes; 0 = allowed to stop
 } cfg;
 
 // Mode queue: an optional playlist that auto-advances the mode on a timer.
@@ -184,6 +243,8 @@ uint8_t  queueLen = 0;
 bool     queueEnabled = false;
 uint8_t  queueIdx = 0;
 uint32_t queueStepStart = 0;
+bool     queueOffPending = false;   // set when firmware cancels the queue; the
+                                    // WiFi build broadcasts it once to sync the UI
 
 #define CROSSFADE_MS 1000          // mode change envelope blend duration
 
@@ -192,6 +253,18 @@ uint32_t queueStepStart = 0;
 // there is no gravity load to backdrive when current cuts. Set to 1 to keep
 // the driver energised at hold current if an unbalanced piece needs holding.
 #define HOLD_TORQUE_ON_DISABLE 0
+
+// Motor current (TMC2209 over UART) and enable soft-start. Energizing a
+// de-energized stepper at full current yanks the rotor to the nearest detent;
+// instead the enable edge powers the coils at SOFT_START_MA and steps up to
+// RUN_CURRENT_MA over SOFT_START_MS while motion is held at zero, so the rotor
+// settles gently. ENABLE_GRACE_MS then stretches the speed ramp so an enable
+// with the slider already up builds speed deliberately instead of leaping.
+#define RUN_CURRENT_MA   900
+#define HOLD_MULT        0.3f
+#define SOFT_START_MA    150
+#define SOFT_START_MS    450
+#define ENABLE_GRACE_MS  1200
 
 // ============================================================
 //  MOTION CORE  (shared, never inside #ifdef)
@@ -226,7 +299,39 @@ float smoothDamp(float current, float target, float &vel,
 }
 
 void applyMotion() {
+  // --- Enable soft-start: settle the rotor before moving it ---
+  static bool prevEnabled = false;
+  uint32_t nowMs = millis();
+  if (motorEnabled && !prevEnabled) {
+    softStartAt = nowMs ? nowMs : 1;          // 0 means idle, avoid the collision
+    softStage = 0;
+    enableGraceUntil = nowMs + SOFT_START_MS + ENABLE_GRACE_MS;
+#if !HOLD_TORQUE_ON_DISABLE
+    if (uartOk) driver.rms_current(SOFT_START_MA, 1.0f);  // weak first grab
+#endif
+    if (stepper) { stepper->enableOutputs(); stepper->stopMove(); }
+  }
+  prevEnabled = motorEnabled;
+
+  bool softStarting = softStartAt && (nowMs - softStartAt < SOFT_START_MS);
+  if (softStarting) {
+#if !HOLD_TORQUE_ON_DISABLE
+    // Step the coil current up in five stages across the window.
+    uint8_t stage = (uint8_t)((nowMs - softStartAt) * 5 / SOFT_START_MS);
+    if (stage != softStage && uartOk) {
+      softStage = stage;
+      driver.rms_current(SOFT_START_MA + (RUN_CURRENT_MA - SOFT_START_MA) * stage / 5, HOLD_MULT);
+    }
+#endif
+  } else if (softStartAt) {
+    softStartAt = 0;
+#if !HOLD_TORQUE_ON_DISABLE
+    if (uartOk) driver.rms_current(RUN_CURRENT_MA, HOLD_MULT);  // land exactly on spec
+#endif
+  }
+
   if (!motorEnabled) targetFreq = 0;   // disabled means ease down to a stop
+  if (softStarting)  targetFreq = 0;   // hold still while the field comes up
 
   // Real elapsed time keeps the tracker independent of loop rate.
   static uint32_t lastUs = 0;
@@ -239,9 +344,11 @@ void applyMotion() {
   // constant; speeding up uses the snappier one. This makes wind down from full
   // speed ease off smoothly without making acceleration feel sluggish.
   float st = (fabsf((float)targetFreq) < fabsf(trackPos)) ? cfg.smoothDown : cfg.smoothUp;
+  if (nowMs < enableGraceUntil) st *= 2.5f;   // deliberate, unhurried first spin-up
   trackPos = smoothDamp(trackPos, (float)targetFreq, trackVel, st, MAX_ACCEL, dt);
   currFreq = (int)lroundf(trackPos);
 
+  appliedFreq = 0;            // set below only when the stepper is actually driven
   if (!stepper) return;
 
   // Once fully stopped and disabled, either hold at hold current or cut current.
@@ -270,6 +377,7 @@ void applyMotion() {
   stepper->setSpeedInHz((uint32_t)mag);
   if (currFreq > 0) stepper->runForward();
   else              stepper->runBackward();
+  appliedFreq = currFreq;
 }
 
 // ============================================================
@@ -325,6 +433,75 @@ int modeWander(uint32_t now, int cap, bool entered) {
   return (int)(cap * v);
 }
 
+int modeTide(uint32_t now, int cap, bool entered) {
+  (void)entered;
+  // Minutes-long swell: rise to the ceiling and subside, then repeat with the
+  // direction reversed, like a tide turning. sin^2 gives a soft trough and a
+  // broad peak. The 0.08 floor keeps it barely, visibly, alive at the turn;
+  // the tracker eases the sign flip through zero so the reversal is seamless.
+  float ph = (now % cfg.tideMs) / (float)cfg.tideMs;   // 0..1
+  float s = sinf(ph * PI);
+  float env = 0.08f + 0.92f * s * s;
+  int f = (int)(cap * env);
+  int dir = ((now / cfg.tideMs) & 1) ? -1 : 1;         // alternate per cycle
+  return (lastManualDir >= 0 ? dir : -dir) * f;
+}
+
+int modePendulum(uint32_t now, int cap, bool entered) {
+  // Pure signed sine on velocity: the disc rocks to and fro, fastest at the
+  // centre of each swing and lingering at the extremes. The complement of
+  // SWEEP, which is slowest at its reversals. Phase restarts on entry so the
+  // first swing always begins from rest.
+  static uint32_t t0 = 0;
+  if (entered) t0 = now;
+  float ph = ((now - t0) % cfg.pendMs) / (float)cfg.pendMs;   // 0..1
+  int f = (int)(cap * sinf(ph * TWO_PI));
+  return lastManualDir >= 0 ? f : -f;
+}
+
+// Raised-cosine bump centred at c with half-width w, evaluated at phase ph.
+static float hbPulse(float ph, float c, float w) {
+  float d = fabsf(ph - c);
+  if (d > w) return 0.0f;
+  return 0.5f * (1.0f + cosf(PI * d / w));
+}
+
+int modeHeartbeat(uint32_t now, int cap, bool entered) {
+  (void)entered;
+  // Lub-dub: a strong surge, a softer echo, then a long low rest. Asymmetry
+  // is what makes it read as alive. Floor keeps the rest phase visibly moving.
+  float ph = (now % cfg.beatMs) / (float)cfg.beatMs;   // 0..1
+  float env = hbPulse(ph, 0.10f, 0.07f) + 0.75f * hbPulse(ph, 0.27f, 0.06f);
+  if (env > 1.0f) env = 1.0f;
+  env = 0.12f + 0.88f * env;
+  int f = (int)(cap * env);
+  return lastManualDir >= 0 ? f : -f;
+}
+
+int modeStutter(uint32_t now, int cap, bool entered) {
+  // Clockwork: jump between a few discrete speed levels, holding each for a
+  // random dwell, occasionally flipping direction. The tracker still eases
+  // between levels, so it reads as mechanical steps rather than violent jerks.
+  // A hash of the step index picks level and dwell deterministically, so it is
+  // reproducible per boot yet never looks periodic.
+  static uint32_t stepEnd = 0;
+  static uint32_t idx = 0;
+  static int level = 0;      // 0..LEVELS-1
+  static int dir = 1;
+  const int LEVELS = 5;
+  if (entered) { stepEnd = 0; idx = 0; dir = (lastManualDir >= 0) ? 1 : -1; }
+  if (now >= stepEnd) {
+    idx++;
+    uint32_t h = idx * 2654435761u;             // Knuth multiplicative hash
+    level = 1 + (int)((h >> 8) % LEVELS);        // 1..LEVELS, never a dead stop
+    uint32_t dwell = cfg.stutMs / 2 + (h % cfg.stutMs);   // 0.5x..1.5x base
+    stepEnd = now + dwell;
+    if (((h >> 20) & 7) == 0) dir = -dir;        // ~1 in 8 steps reverses
+  }
+  int f = (int)((float)cap * level / LEVELS);
+  return dir * f;
+}
+
 struct ModeDef {
   const char *name;
   ModeFn      fn;
@@ -332,17 +509,23 @@ struct ModeDef {
 };
 
 const ModeDef MODES[] = {
-  { "MANUAL",  modeManual,  false },
-  { "BREATHE", modeBreathe, true  },
-  { "SWEEP",   modeSweep,   true  },
-  { "WANDER",  modeWander,  true  },
+  { "MANUAL",    modeManual,    false },
+  { "BREATHE",   modeBreathe,   true  },
+  { "SWEEP",     modeSweep,     true  },
+  { "WANDER",    modeWander,    true  },
+  { "TIDE",      modeTide,      true  },
+  { "PENDULUM",  modePendulum,  true  },
+  { "HEARTBEAT", modeHeartbeat, true  },
+  { "STUTTER",   modeStutter,   true  },
 };
 const uint8_t MODE_COUNT = sizeof(MODES) / sizeof(MODES[0]);
 
-// Ceiling for a given mode, floored to MODE_MIN_SPEED unless the mode is exempt.
+// Ceiling for a given mode, floored to the runtime minimum unless the mode is
+// exempt. cfg.minSpeed = 0 lets auto modes be starved to a standstill, which is
+// now a deliberate user choice rather than a failure state.
 int modeCeiling(uint8_t m) {
   int cap = maxSpeedCeiling;
-  if (MODES[m].floorSpeed && cap < MODE_MIN_SPEED) cap = MODE_MIN_SPEED;
+  if (MODES[m].floorSpeed && cap < cfg.minSpeed) cap = cfg.minSpeed;
   return cap;
 }
 
@@ -396,7 +579,7 @@ void applyDriverConfig() {
   driver.pwm_freq(1);             // 35.1kHz, above audible
   driver.microsteps(16);
   driver.intpol(true);            // interpolate to 256 internally
-  driver.rms_current(900, 0.3);   // 900mA run, 0.3 hold multiplier
+  driver.rms_current(RUN_CURRENT_MA, HOLD_MULT);
   driver.iholddelay(6);
 }
 
@@ -426,20 +609,38 @@ void initTMC() {
 #define COMM_CONFIRM 5    // consecutive bad GCONF reads before flagging comm loss (~2.5s at 2Hz)
 
 void pollHealth() {
-  uint32_t g = driver.GCONF();
-  bool commBad = (g == 0 || g == 0xFFFFFFFF);
-  if (commBad) { g = driver.GCONF(); commBad = (g == 0 || g == 0xFFFFFFFF); }  // retry once: UART reads can glitch while stepping
-
+  // Round-robin: exactly ONE TMC UART transaction per call. Each read is a
+  // blocking request+reply on Serial1 and glitched reads wait out a timeout;
+  // stacking 3-4 of them back to back stalled the loop for tens of ms every
+  // poll, starving ws.loop() and http on this single core chip. One register
+  // per 500ms tick caps the worst case stall at a single transaction.
+  static uint8_t phase = 0;
+  static bool commBad = false;
   static uint8_t commBadCount = 0;
-  if (commBad) { if (commBadCount < 255) commBadCount++; }
-  else commBadCount = 0;
-  faultTmcComm = (commBadCount >= COMM_CONFIRM);
-
-  // Read overtemp only on a frame whose GCONF looked sane this cycle.
-  bool otpw = (!commBad) && driver.otpw();
+  static bool otpw = false;
   static uint8_t otpwCount = 0;
-  if (otpw) { if (otpwCount < 255) otpwCount++; }
-  else otpwCount = 0;
+
+  switch (phase) {
+    case 0: {                      // GCONF: comm liveness
+      uint32_t g = driver.GCONF();
+      commBad = (g == 0 || g == 0xFFFFFFFF);
+      if (commBad) { if (commBadCount < 255) commBadCount++; }
+      else commBadCount = 0;
+      faultTmcComm = (commBadCount >= COMM_CONFIRM);
+      break;
+    }
+    case 1: {                      // overtemp, only if comm looked sane
+      otpw = (!commBad) && driver.otpw();
+      if (otpw) { if (otpwCount < 255) otpwCount++; }
+      else otpwCount = 0;
+      break;
+    }
+    case 2: {                      // StallGuard load for telemetry
+      if (!faultTmcComm) sgLoad = driver.SG_RESULT();
+      break;
+    }
+  }
+  phase = (phase + 1) % 3;
 
   if (otpwCount >= OTPW_CONFIRM) {
     faultOvertemp = true;
@@ -449,8 +650,6 @@ void pollHealth() {
     faultOvertemp = false;
     speedDerate = 1.0f;
   }
-
-  if (!faultTmcComm) sgLoad = driver.SG_RESULT();
 
   static bool prevAny = false;
   bool any = faultTmcComm || faultOvertemp || faultTof;
@@ -462,15 +661,166 @@ void pollHealth() {
 }
 
 // ============================================================
+//  WS2812 LED RINGS  (optional, ENABLE_LEDS)
+//  One chained strip on LED_PIN, addressed as two segments (ring A then ring
+//  B). Reactive modes read appliedFreq so the light truthfully follows what
+//  the motor is physically doing, including the FREQ_MIN standstill.
+// ============================================================
+#ifdef ENABLE_LEDS
+Adafruit_NeoPixel pixels(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+enum LedMode : uint8_t { LED_OFF = 0, LED_SOLID, LED_GLOW, LED_CHASE, LED_RAINBOW };
+struct LedCfg {
+  uint8_t  mode = LED_GLOW;
+  uint16_t hue  = 30;    // 0..359
+  uint8_t  bri  = 60;    // 0..100
+  uint8_t  rate = 50;    // 1..100, animation speed for CHASE/RAINBOW
+} led;
+bool ledDirty = false;   // set on any change; NVS save debounced in persistTask
+
+void loadLed() {
+  led.mode = prefs.getUChar ("l_md",  LED_GLOW);
+  if (led.mode > LED_RAINBOW) led.mode = LED_GLOW;
+  led.hue  = prefs.getUShort("l_hue", 30);
+  if (led.hue > 359) led.hue = 30;
+  led.bri  = prefs.getUChar ("l_bri", 60);
+  if (led.bri > 100) led.bri = 60;
+  led.rate = prefs.getUChar ("l_rt",  50);
+  if (led.rate < 1 || led.rate > 100) led.rate = 50;
+}
+
+void saveLed() {
+  prefs.putUChar ("l_md",  led.mode);
+  prefs.putUShort("l_hue", led.hue);
+  prefs.putUChar ("l_bri", led.bri);
+  prefs.putUChar ("l_rt",  led.rate);
+  Serial.println("[nvs] saved led config");
+}
+
+// Draw a comet (head + fading tail) on one segment, wrapping within it.
+void ledComet(int base, int count, float pos, uint32_t headColor) {
+  int head = ((int)pos % count + count) % count;
+  for (int t = 0; t < 6 && t < count; t++) {
+    int i = (head - t % count + count) % count;
+    uint8_t r = (headColor >> 16) & 0xFF, g = (headColor >> 8) & 0xFF, b = headColor & 0xFF;
+    pixels.setPixelColor(base + i, pixels.Color(r >> t, g >> t, b >> t));
+  }
+}
+
+void ledTask() {
+  static float posA = 0, posB = 0, wheel = 0;
+  static bool offDone = false;
+  static uint32_t lastMs = 0;
+  uint32_t now = millis();
+  float dt = (lastMs == 0) ? 0.033f : (now - lastMs) * 0.001f;
+  lastMs = now;
+  if (dt > 0.2f) dt = 0.2f;
+
+  if (led.mode == LED_OFF) {
+    if (!offDone) { pixels.clear(); pixels.show(); offDone = true; }
+    return;
+  }
+  offDone = false;
+
+  uint8_t v = (uint16_t)led.bri * 255 / 100;
+  uint32_t base = pixels.gamma32(pixels.ColorHSV((uint32_t)led.hue * 182, 255, v));
+
+  switch (led.mode) {
+    case LED_SOLID:
+      pixels.fill(base, 0, LED_COUNT);
+      break;
+
+    case LED_GLOW: {
+      // Brightness breathes with the sculpture's real speed. 8% floor keeps a
+      // faint presence at standstill instead of going fully dark.
+      float n = fabsf((float)appliedFreq) / (float)FREQ_MAX;
+      if (n > 1.0f) n = 1.0f;
+      uint8_t gv = (uint8_t)(v * (0.08f + 0.92f * n));
+      pixels.fill(pixels.gamma32(pixels.ColorHSV((uint32_t)led.hue * 182, 255, gv)), 0, LED_COUNT);
+      break;
+    }
+
+    case LED_CHASE: {
+      // Comets spin with the disc: speed and direction follow appliedFreq,
+      // segment B runs opposite to A to echo the counter-rotation.
+      float rev = (appliedFreq / (float)FREQ_MAX) * (led.rate / 50.0f) * 1.5f; // rev/s at full speed
+      posA = fmodf(posA + rev * LED_COUNT_A * dt, (float)LED_COUNT_A);
+      posB = fmodf(posB - rev * LED_COUNT_B * dt, (float)LED_COUNT_B);
+      // fmodf keeps the accumulators bounded; unwrapped they grow ~3M/day and
+      // float precision starves the animation after a few days of uptime.
+      pixels.clear();
+      ledComet(0,           LED_COUNT_A, posA, base);
+      ledComet(LED_COUNT_A, LED_COUNT_B, posB, base);
+      break;
+    }
+
+    case LED_RAINBOW: {
+      // Ambient hue wheel, independent of motion; rings drift opposite ways.
+      wheel += (led.rate * 1.2f) * dt;                    // degrees/s
+      if (wheel >= 360.0f) wheel -= 360.0f;
+      for (int i = 0; i < LED_COUNT_A; i++) {
+        float h = wheel + i * 360.0f / LED_COUNT_A;
+        pixels.setPixelColor(i, pixels.gamma32(pixels.ColorHSV((uint32_t)((uint16_t)h % 360) * 182, 255, v)));
+      }
+      for (int i = 0; i < LED_COUNT_B; i++) {
+        float h = -wheel + i * 360.0f / LED_COUNT_B;
+        while (h < 0) h += 360.0f;
+        pixels.setPixelColor(LED_COUNT_A + i, pixels.gamma32(pixels.ColorHSV((uint32_t)((uint16_t)h % 360) * 182, 255, v)));
+      }
+      break;
+    }
+  }
+  pixels.show();
+}
+#endif  // ENABLE_LEDS
+
+// ============================================================
 //  NVS PERSISTENCE  (shared)
+// NVS schema version. Bump when a key changes meaning or needs active repair.
+// New keys with safe defaults do NOT need a bump: every getX() call in this
+// file supplies a default, so missing keys self-heal. The migration ladder is
+// for the cases defaults cannot fix. Falls through so any old version walks
+// every step up to current.
+#define CFG_VER 1
+
+void migrateConfig() {
+  uint32_t v = prefs.getUInt("cfg_ver", 0);
+  if (v == CFG_VER) return;
+  switch (v) {
+    case 0: {
+      // v0 boards derived their identity from the MAC's OUI bytes, so a whole
+      // batch shared one suffix (e.g. -8C58) in stored AP names and hostnames.
+      // Rewrite any stored name carrying the OLD suffix to the corrected one.
+      char oldUid[8], newUid[8];
+      snprintf(oldUid, sizeof(oldUid), "%04X", (uint16_t)(ESP.getEfuseMac() & 0xFFFF));
+      snprintf(newUid, sizeof(newUid), "%04X", (uint16_t)(ESP.getEfuseMac() >> 32));
+      const char *keys[] = { "ap_ssid", "host" };
+      for (auto k : keys) {
+        String val = prefs.getString(k, "");
+        int p = val.indexOf(oldUid);
+        if (p >= 0) {
+          val = val.substring(0, p) + newUid + val.substring(p + 4);
+          prefs.putString(k, val);
+          Serial.printf("[nvs] migrate v0: %s -> %s\n", k, val.c_str());
+        }
+      }
+      // fall through
+    }
+    default: break;
+  }
+  prefs.putUInt("cfg_ver", CFG_VER);
+  Serial.printf("[nvs] config schema %u -> %u\n", v, CFG_VER);
+}
+
 //  Restores mode + ceiling on boot, saves them debounced so a power cycle
 //  resumes gracefully. The motor still boots disabled regardless.
 // ============================================================
 void loadSettings() {
   prefs.begin("sculpt", false);
+  migrateConfig();          // upgrade NVS written by older firmware first
   mode = prefs.getUChar("mode", MANUAL);
   if (mode >= MODE_COUNT) mode = MANUAL;
-  maxSpeedCeiling = prefs.getInt("ceil", FREQ_MAX);
+  maxSpeedCeiling = prefs.getInt("ceil", 0);   // 0 on a fresh board: slider at rest
   if (maxSpeedCeiling < 0) maxSpeedCeiling = 0;
   if (maxSpeedCeiling > FREQ_MAX) maxSpeedCeiling = FREQ_MAX;
   Serial.printf("[nvs] restored mode=%u ceil=%d\n", mode, maxSpeedCeiling);
@@ -502,6 +852,13 @@ void loadMotion() {
   cfg.breatheMs    = prefs.getUInt ("m_bms", BREATHE_PERIOD_MS);
   cfg.sweepHalfMs  = prefs.getUInt ("m_sms", SWEEP_HALF_MS);
   cfg.wanderRate   = prefs.getFloat("m_wr",  WANDER_RATE);
+  cfg.tideMs       = prefs.getUInt ("m_tms", TIDE_PERIOD_MS);
+  cfg.pendMs       = prefs.getUInt ("m_pms", PEND_PERIOD_MS);
+  cfg.beatMs       = prefs.getUInt ("m_hms", BEAT_PERIOD_MS);
+  cfg.stutMs       = prefs.getUInt ("m_sts", STUT_PERIOD_MS);
+  cfg.minSpeed     = prefs.getInt  ("m_flo", MODE_MIN_SPEED);
+  if (cfg.minSpeed < 0) cfg.minSpeed = 0;
+  if (cfg.minSpeed > FREQ_MAX) cfg.minSpeed = FREQ_MAX;
   cfg.smoothUp     = prefs.getFloat("m_up",  SMOOTH_TIME_UP);
   cfg.smoothDown   = prefs.getFloat("m_dn",  SMOOTH_TIME_DOWN);
   cfg.breatheShape = prefs.getFloat("m_bsh", BREATHE_SHAPE);
@@ -515,6 +872,11 @@ void saveMotion() {
   prefs.putUInt ("m_bms", cfg.breatheMs);
   prefs.putUInt ("m_sms", cfg.sweepHalfMs);
   prefs.putFloat("m_wr",  cfg.wanderRate);
+  prefs.putUInt ("m_tms", cfg.tideMs);
+  prefs.putUInt ("m_pms", cfg.pendMs);
+  prefs.putUInt ("m_hms", cfg.beatMs);
+  prefs.putUInt ("m_sts", cfg.stutMs);
+  prefs.putInt  ("m_flo", cfg.minSpeed);
   prefs.putFloat("m_up",  cfg.smoothUp);
   prefs.putFloat("m_dn",  cfg.smoothDown);
   prefs.putFloat("m_bsh", cfg.breatheShape);
@@ -542,6 +904,25 @@ void queueTask() {
   }
 }
 
+// Queue playback and direct mode selection are mutually exclusive. Any direct
+// choice (app button, ToF gesture, mode button) stops the queue; the stored
+// playlist is kept, only the enable flag drops, and it is persisted immediately
+// so a reboot does not resurrect playback the user just cancelled.
+void cancelQueue(const char *why) {
+  if (!queueEnabled) return;
+  queueEnabled = false;
+  queueStepStart = 0;
+  prefs.putBool("q_en", false);
+  queueOffPending = true;   // WiFi build broadcasts this to sync the UI checkbox
+  Serial.printf("[queue] stopped (%s)\n", why);
+}
+
+void userSelectMode(uint8_t m) {
+  cancelQueue("mode selected directly");
+  if (m >= MODE_COUNT) m = 0;
+  mode = m;
+}
+
 void persistTask() {
   static bool init = false;
   static uint8_t savMode = 255, obsMode = 255;
@@ -561,7 +942,17 @@ void persistTask() {
     savMode = mode; savCeil = maxSpeedCeiling;
     Serial.printf("[nvs] saved mode=%u ceil=%d\n", mode, maxSpeedCeiling);
   }
+
+#ifdef ENABLE_LEDS
+  // LED sliders stream live values; write NVS only after 3s of quiet so a
+  // drag does not hammer flash.
+  static bool ledPend = false;
+  static uint32_t ledQuiet = 0;
+  if (ledDirty) { ledDirty = false; ledPend = true; ledQuiet = now; }
+  if (ledPend && now - ledQuiet > 3000) { ledPend = false; saveLed(); }
+#endif
 }
+
 
 // ============================================================
 //  POT + BUTTON INPUT
@@ -598,7 +989,7 @@ void pollPotButtons() {
   int r = digitalRead(MODE_BTN);
   if (last == HIGH && r == LOW && millis() - t0 > DEBOUNCE_MS) {
     t0 = millis();
-    mode = (mode + 1) % MODE_COUNT;
+    userSelectMode((mode + 1) % MODE_COUNT);
     Serial.printf("[mode] -> %u\n", mode);
   }
   last = r;
@@ -684,6 +1075,10 @@ int readToFRaw() {
 bool initToF() {
   Wire.begin(SDA_PIN, SCL_PIN);
   Wire.setClock(100000);
+  // A stuck bus otherwise blocks ~50ms (core default) per op, twice per read,
+  // at 30Hz: instant loop starvation. A full read takes <1ms at 100kHz, so 5ms
+  // is generous.
+  Wire.setTimeOut(5);
   delay(50);
   int d = readToFRaw();
   bool ok = (d >= 0);
@@ -703,6 +1098,14 @@ int median3(int a, int b, int c) {
 // 3 sample median rejects single spikes and an EMA calms residual jitter.
 // Cadence is owned by the scheduler, so there is no internal time gate here.
 bool sampleToF() {
+  // Dead sensor backoff: once faulted, probe at 1Hz instead of hammering a
+  // dead bus at 30Hz. Recovers automatically when reads succeed again.
+  static uint32_t tNextProbe = 0;
+  if (faultTof) {
+    uint32_t now = millis();
+    if (now < tNextProbe) return false;
+    tNextProbe = now + 1000;
+  }
   int d = readToFRaw();
   static uint16_t failRun = 0;
   if (d < 0) { if (failRun < 0xFFFF) failRun++; }   // raw read failed
@@ -740,7 +1143,7 @@ int ceilingFromDist(int d) {
 }
 
 void fireModeChange() {
-  mode = (mode + 1) % MODE_COUNT;
+  userSelectMode((mode + 1) % MODE_COUNT);
   Serial.printf("[gesture] mode change -> %u\n", mode);
 }
 
@@ -758,6 +1161,7 @@ void fireNetworkReset() {
   prefs.remove("ap_ssid");  prefs.remove("ap_pass");  prefs.remove("ap_ip");
   prefs.remove("host");
   prefs.remove("use_static"); prefs.remove("sta_ip"); prefs.remove("sta_gw"); prefs.remove("sta_mask");
+  prefs.remove("ui_pass");   // owner escape hatch for a forgotten interface password
   delay(200);
   ESP.restart();
 #else
@@ -881,7 +1285,7 @@ DNSServer        dns;
 #define DEF_AP_PASS "kinetic123"
 #define DEF_HOST    "sculpture"
 #define OTA_PASS    "kinetic"    // required by the IDE when uploading over WiFi
-#define FW_VERSION  "1.3.0"      // shown in the UI; bump on each release
+#define FW_VERSION  "2.0.7"      // shown in the UI; bump on each release
 
 // Loaded network settings + live status.
 String    apSsid, apPass, staSsid, staPass, hostName;
@@ -893,7 +1297,7 @@ void performOtaPull(const String &url);   // defined below, called from the WS h
 
 // The web app hardcodes one button per mode. If MODE_COUNT changes, the buttons
 // in PAGE must change too. This catches the mismatch at build time.
-static_assert(MODE_COUNT == 4, "web app PAGE has 4 mode buttons; update it to match MODE_COUNT");
+static_assert(MODE_COUNT == 8, "web app PAGE has 8 mode buttons; update it to match MODE_COUNT");
 
 // The web app (HTML/CSS/JS) lives in page.h as a PROGMEM raw string literal.
 // It must stay in a header. The Arduino IDE / arduino-cli ctags prototype
@@ -902,30 +1306,92 @@ static_assert(MODE_COUNT == 4, "web app PAGE has 4 mode buttons; update it to ma
 // type). ctags does not scan #included files, so the literal is safe here.
 #include "page.h"
 
+
+// ---------- Web interface authentication ----------
+// Optional password gate. Empty ui_pass (factory state) = open access, exactly
+// the old behavior. When set: WS clients must send {cmd:"auth",pw} before any
+// command is honored or telemetry is sent to them; HTTP JSON endpoints require
+// the session token handed out on successful auth. The page itself is always
+// served (it is not a secret; the lock screen lives in it). The physical
+// network-reset gesture clears the password: that is the owner escape hatch.
+String uiPass;                 // stored password, empty = no gate
+String uiToken;                // per-boot session token for HTTP fetches
+bool wsAuthed[WEBSOCKETS_SERVER_CLIENT_MAX] = { false };
+
+bool authRequired() { return uiPass.length() > 0; }
+
+// Send to authorized clients only (all clients when no password is set).
+void wsSendAll(const String &msg) {
+  String m = msg;   // sendTXT takes a mutable reference in this library
+  for (uint8_t i = 0; i < WEBSOCKETS_SERVER_CLIENT_MAX; i++)
+    if (wsAuthed[i] && ws.clientIsConnected(i)) ws.sendTXT(i, m);
+}
+void wsSendAll(const char *msg) { wsSendAll(String(msg)); }
+
+bool httpAuthed() { return !authRequired() || http.arg("t") == uiToken; }
+
 void onWsEvent(uint8_t n, WStype_t type, uint8_t *payload, size_t len) {
+  if (type == WStype_CONNECTED) {
+    wsAuthed[n] = !authRequired();
+    char h[192];
+    snprintf(h, sizeof(h),
+      "{\"type\":\"hello\",\"auth\":%s,\"fw\":\"%s\",\"host\":\"%s\",\"tok\":\"%s\"}",
+      authRequired() ? "true" : "false", FW_VERSION, hostName.c_str(),
+      authRequired() ? "" : uiToken.c_str());
+    ws.sendTXT(n, h);
+    return;
+  }
+  if (type == WStype_DISCONNECTED) { wsAuthed[n] = false; return; }
   if (type != WStype_TEXT) return;
   JsonDocument d;
   if (deserializeJson(d, payload, len)) return;
   const char *c = d["cmd"] | "";
 
+  // Auth handshake and password management come before the command gate.
+  if (!strcmp(c, "auth")) {
+    if (!authRequired() || uiPass == String((const char*)(d["pw"] | ""))) {
+      wsAuthed[n] = true;
+      ws.sendTXT(n, String("{\"type\":\"authok\",\"tok\":\"") + uiToken + "\"}");
+    } else {
+      ws.sendTXT(n, "{\"type\":\"authfail\"}");
+    }
+    return;
+  }
+  if (authRequired() && !wsAuthed[n]) {
+    ws.sendTXT(n, "{\"type\":\"authfail\"}");   // commands ignored until authed
+    return;
+  }
+  if (!strcmp(c, "setpass")) {
+    // Set, change, or clear (empty) the interface password. Requester is
+    // already authed (or no password existed). All open sessions stay valid.
+    String np = (const char*)(d["pw"] | "");
+    if (np.length() > 32) np = np.substring(0, 32);
+    uiPass = np;
+    if (np.length()) prefs.putString("ui_pass", np); else prefs.remove("ui_pass");
+    wsAuthed[n] = true;
+    ws.sendTXT(n, "{\"type\":\"passset\"}");
+    Serial.printf("[auth] interface password %s\n", np.length() ? "set" : "cleared");
+    return;
+  }
+
   // Last command wins. App speed overrides the ToF ceiling until the next ToF gesture.
   if (!strcmp(c, "mode")) {
-    mode = constrain((int)(d["v"] | 0), 0, MODE_COUNT - 1);
+    userSelectMode((uint8_t)constrain((int)(d["v"] | 0), 0, MODE_COUNT - 1));
   } else if (!strcmp(c, "enable")) {
     motorEnabled = d["v"] | false;
   } else if (!strcmp(c, "speed")) {
-    // Bidirectional: -100..100. Magnitude sets the ceiling; in MANUAL the sign
-    // also sets direction. Auto modes take only the magnitude (their direction
-    // is programmatic), so the slider behaves as a speed ceiling there.
+    // Bidirectional: -100..100. Magnitude sets the ceiling; the sign sets
+    // direction in every mode. MANUAL applies the signed value directly; the
+    // auto modes inherit the sign through lastManualDir (those that carry their
+    // own reversal cadence, SWEEP and STUTTER, seed from it on next entry).
     int pct = constrain((int)(d["v"] | 0), -100, 100);
     // 0% stops; 1..100% maps onto a genuinely moving range so the low end of the
     // slider is not a dead zone (1-2% used to command < start speed).
     int mag = (pct == 0) ? 0 : map(abs(pct), 1, 100, MANUAL_MIN_MOVE, FREQ_MAX);
     maxSpeedCeiling = mag;
-    if (mode == MANUAL) {
-      manualSpeed = (pct >= 0) ? mag : -mag;
-      if (pct > 0) lastManualDir = 1; else if (pct < 0) lastManualDir = -1;
-    }
+    lastSliderPct = pct;
+    if (pct > 0) lastManualDir = 1; else if (pct < 0) lastManualDir = -1;   // 0 keeps last
+    if (mode == MANUAL) manualSpeed = (pct >= 0) ? mag : -mag;
   } else if (!strcmp(c, "netcfg")) {
     // Persist network settings then reboot to apply. Passwords are only written
     // when present, so leaving the field blank keeps the stored one.
@@ -940,7 +1406,7 @@ void onWsEvent(uint8_t n, WStype_t type, uint8_t *payload, size_t len) {
     prefs.putString("sta_mask", (const char*)(d["mask"] | "255.255.255.0"));
     if (d["pass"].is<const char*>())   prefs.putString("sta_pass", (const char*)d["pass"]);
     if (d["appass"].is<const char*>()) prefs.putString("ap_pass",  (const char*)d["appass"]);
-    ws.broadcastTXT("{\"type\":\"netsaved\"}");
+    wsSendAll("{\"type\":\"netsaved\"}");
     delay(300);
     ESP.restart();
   } else if (!strcmp(c, "netreset")) {
@@ -951,6 +1417,11 @@ void onWsEvent(uint8_t n, WStype_t type, uint8_t *payload, size_t len) {
     cfg.sweepHalfMs = (uint32_t)constrain((int)(d["sms"] | 20),  2, 600) * 1000UL / 2;
     float wp        = constrain((float)(d["wms"] | 28.0), 4.0, 300.0);
     cfg.wanderRate  = 6.2832f / (0.45f * wp * 1000.0f);
+    cfg.tideMs      = (uint32_t)constrain((int)(d["tmin"] | 8),  1, 60) * 60000UL;
+    cfg.pendMs      = (uint32_t)constrain((int)(d["pms"]  | 12), 4, 120) * 1000UL;
+    cfg.beatMs      = (uint32_t)constrain((int)(d["hbs"]  | 4),  2, 20) * 1000UL;
+    cfg.stutMs      = (uint32_t)constrain((int)(d["sts"]  | 900), 100, 4000);
+    cfg.minSpeed    = constrain((int)(d["flo"] | MODE_MIN_SPEED), 0, FREQ_MAX);
     cfg.smoothUp    = constrain((float)(d["up"]  | 0.5), 0.1, 3.0);
     cfg.smoothDown  = constrain((float)(d["dn"]  | 1.1), 0.1, 5.0);
     cfg.breatheShape= constrain((float)(d["bsh"] | 4.0), 1.0, 8.0);
@@ -966,38 +1437,77 @@ void onWsEvent(uint8_t n, WStype_t type, uint8_t *payload, size_t len) {
     }
     queueStepStart = 0;          // restart the queue from step 0
     saveMotion();
-    ws.broadcastTXT("{\"type\":\"motionsaved\"}");
+    wsSendAll("{\"type\":\"motionsaved\"}");
   } else if (!strcmp(c, "fwupdate")) {
     fwUrl = (const char*)(d["url"] | "");
     if (fwUrl.length() < 8) {
-      ws.broadcastTXT("{\"type\":\"fwstatus\",\"s\":\"failed\",\"m\":\"no url\"}");
+      wsSendAll("{\"type\":\"fwstatus\",\"s\":\"failed\",\"m\":\"no url\"}");
     } else {
       prefs.putString("fw_url", fwUrl);
       performOtaPull(fwUrl);
     }
   }
+#ifdef ENABLE_LEDS
+  else if (!strcmp(c, "led")) {
+    led.mode = (uint8_t)constrain((int)(d["m"]   | 0), 0, 4);
+    led.hue  = (uint16_t)constrain((int)(d["hue"] | 30), 0, 359);
+    led.bri  = (uint8_t)constrain((int)(d["bri"] | 60), 0, 100);
+    led.rate = (uint8_t)constrain((int)(d["rt"]  | 50), 1, 100);
+    ledDirty = true;   // applied immediately; NVS save is debounced in persistTask
+    char lb[96];
+    snprintf(lb, sizeof(lb), "{\"type\":\"led\",\"m\":%u,\"hue\":%u,\"bri\":%u,\"rt\":%u}",
+             led.mode, led.hue, led.bri, led.rate);
+    wsSendAll(lb);     // keep every open client's Light tab in sync
+  }
+#endif
+}
+
+// Slider position for cross-client sync. If the current ceiling is exactly the
+// one the app's last percent produced, echo that percent verbatim; the forward
+// and inverse integer map() calls do not round-trip, and the off-by-one nudged
+// the slider on every release. The inverse map is kept only for ceilings set by
+// gesture or pot, where no exact percent exists.
+int sliderPctForTele() {
+  if (maxSpeedCeiling <= 0) return 0;
+  if (lastSliderPct != 0 &&
+      map(abs(lastSliderPct), 1, 100, MANUAL_MIN_MOVE, FREQ_MAX) == maxSpeedCeiling)
+    return lastSliderPct;
+  return (int)lastManualDir * (int)map(constrain(maxSpeedCeiling, MANUAL_MIN_MOVE, FREQ_MAX),
+                                       MANUAL_MIN_MOVE, FREQ_MAX, 1, 100);
 }
 
 void sendTelemetry() {
-  char buf[320];
+  if (queueOffPending) {          // firmware cancelled the queue: sync the UI
+    queueOffPending = false;
+    wsSendAll("{\"type\":\"queueoff\"}");
+  }
+  char buf[352];
   snprintf(buf, sizeof(buf),
-    "{\"type\":\"tele\",\"mode\":%u,\"enabled\":%s,\"speed\":%d,\"gesture\":\"%s\","
+    "{\"type\":\"tele\",\"mode\":%u,\"enabled\":%s,\"speed\":%d,\"qi\":%d,\"gesture\":\"%s\","
     "\"derate\":%d,\"fault\":{\"tmc\":%s,\"otp\":%s,\"tof\":%s},\"sg\":%u,"
-    "\"netmode\":\"%s\",\"netip\":\"%s\"}",
-    mode, motorEnabled ? "true" : "false", currFreq, gestureName(),
+    "\"netmode\":\"%s\",\"netip\":\"%s\",\"sl\":%d,\"leds\":" LEDS_JSON "}",
+    mode, motorEnabled ? "true" : "false", appliedFreq,
+    (queueEnabled && queueLen && queueStepStart) ? (int)queueIdx : -1, gestureName(),
     (int)(speedDerate * 100),
     faultTmcComm ? "true" : "false",
     faultOvertemp ? "true" : "false",
     faultTof ? "true" : "false",
-    sgLoad, netMode.c_str(), netIp.c_str());
-  ws.broadcastTXT(buf);
+    sgLoad, netMode.c_str(), netIp.c_str(), sliderPctForTele());
+  wsSendAll(buf);
 }
 
 void loadNetSettings() {
+  uiPass = prefs.getString("ui_pass", "");
+  char tok[17];
+  snprintf(tok, sizeof(tok), "%08lx%08lx", (unsigned long)esp_random(), (unsigned long)esp_random());
+  uiToken = tok;
   // Per-board suffix from the chip's unique factory ID, so multiple unconfigured
   // boards do not collide on the AP name or sculpture.local hostname.
   char uid[8];
-  snprintf(uid, sizeof(uid), "%04X", (uint16_t)(ESP.getEfuseMac() & 0xFFFF));
+  // ESP.getEfuseMac() returns the base MAC with byte 0 (the OUI vendor prefix)
+  // in the LSB, so "& 0xFFFF" gave the same value on every board (e.g. 8C58).
+  // The device-unique octets are the LAST two MAC bytes, at bits 32-47.
+  snprintf(uid, sizeof(uid), "%04X", (uint16_t)(ESP.getEfuseMac() >> 32));
   apSsid   = prefs.getString("ap_ssid", String(DEF_AP_SSID) + "-" + uid);
   apPass   = prefs.getString("ap_pass", DEF_AP_PASS);
   staSsid  = prefs.getString("sta_ssid", "");
@@ -1031,13 +1541,13 @@ public:
 void performOtaPull(const String &url) {
   if (!useSta || WiFi.status() != WL_CONNECTED) {
     // No upstream internet (AP mode or link down): a remote pull cannot work.
-    ws.broadcastTXT("{\"type\":\"fwstatus\",\"s\":\"failed\",\"m\":\"no internet - join your wifi first (Setup, Join wifi), then update from there\"}");
+    wsSendAll("{\"type\":\"fwstatus\",\"s\":\"failed\",\"m\":\"no internet - join your wifi first (Setup, Join wifi), then update from there\"}");
     return;
   }
   otaActive = true;
   motorEnabled = false;
   if (stepper) { stepper->forceStop(); stepper->disableOutputs(); }
-  ws.broadcastTXT("{\"type\":\"fwstatus\",\"s\":\"downloading\"}");
+  wsSendAll("{\"type\":\"fwstatus\",\"s\":\"downloading\"}");
   ws.loop();
   Serial.printf("[ota] pulling %s\n", url.c_str());
 
@@ -1056,7 +1566,7 @@ void performOtaPull(const String &url) {
     String m = "http " + String(code) + " (heap " + String(ESP.getFreeHeap()) + ")";
     Serial.printf("[ota] %s\n", m.c_str());
     http.end();
-    ws.broadcastTXT(String("{\"type\":\"fwstatus\",\"s\":\"failed\",\"m\":\"") + m + "\"}");
+    wsSendAll(String("{\"type\":\"fwstatus\",\"s\":\"failed\",\"m\":\"") + m + "\"}");
     return;
   }
 
@@ -1072,7 +1582,7 @@ void performOtaPull(const String &url) {
 
   if (ok) {
     Serial.println("[ota] complete, rebooting");
-    ws.broadcastTXT("{\"type\":\"fwstatus\",\"s\":\"ok\"}");
+    wsSendAll("{\"type\":\"fwstatus\",\"s\":\"ok\"}");
     ws.loop();
     delay(300);
     ESP.restart();
@@ -1080,7 +1590,7 @@ void performOtaPull(const String &url) {
     otaActive = false;
     String m = String("write failed: ") + Update.errorString() + " (heap " + String(ESP.getFreeHeap()) + ")";
     Serial.printf("[ota] %s\n", m.c_str());
-    ws.broadcastTXT(String("{\"type\":\"fwstatus\",\"s\":\"failed\",\"m\":\"") + m + "\"}");
+    wsSendAll(String("{\"type\":\"fwstatus\",\"s\":\"failed\",\"m\":\"") + m + "\"}");
   }
 }
 
@@ -1103,6 +1613,7 @@ void startServers() {
   if (MDNS.addService("http", "tcp", 80))
     Serial.printf("[net] http + OTA advertised as %s.local\n", hostName.c_str());
   http.on("/net", []() {
+    if (!httpAuthed()) { http.send(401, "application/json", "{\"err\":\"auth\"}"); return; }
     char b[420];
     snprintf(b, sizeof(b),
       "{\"sta\":%s,\"ssid\":\"%s\",\"apssid\":\"%s\",\"apip\":\"%s\",\"host\":\"%s\","
@@ -1115,6 +1626,7 @@ void startServers() {
     http.send(200, "application/json", b);
   });
   http.on("/motion", []() {
+    if (!httpAuthed()) { http.send(401, "application/json", "{\"err\":\"auth\"}"); return; }
     String q = "[";
     for (uint8_t i = 0; i < queueLen; i++) {
       if (i) q += ",";
@@ -1122,19 +1634,35 @@ void startServers() {
     }
     q += "]";
     float wp = 6.2832f / (0.45f * cfg.wanderRate * 1000.0f);   // rate -> period (s)
-    char b[320];
+    char b[420];
     snprintf(b, sizeof(b),
-      "{\"bms\":%u,\"sms\":%u,\"wms\":%.0f,\"up\":%.2f,\"dn\":%.2f,\"bsh\":%.1f,\"ssh\":%.1f,"
+      "{\"bms\":%u,\"sms\":%u,\"wms\":%.0f,\"tmin\":%u,\"pms\":%u,\"hbs\":%u,"
+      "\"up\":%.2f,\"dn\":%.2f,\"bsh\":%.1f,\"ssh\":%.1f,\"flo\":%d,\"sts\":%u,"
       "\"qen\":%s,\"q\":%s}",
       cfg.breatheMs / 1000, cfg.sweepHalfMs * 2 / 1000, wp,
-      cfg.smoothUp, cfg.smoothDown, cfg.breatheShape, cfg.sweepShape,
+      cfg.tideMs / 60000, cfg.pendMs / 1000, cfg.beatMs / 1000,
+      cfg.smoothUp, cfg.smoothDown, cfg.breatheShape, cfg.sweepShape, cfg.minSpeed, cfg.stutMs,
       queueEnabled ? "true" : "false", q.c_str());
     http.send(200, "application/json", b);
   });
+#ifdef ENABLE_LEDS
+  http.on("/led", []() {
+    if (!httpAuthed()) { http.send(401, "application/json", "{\"err\":\"auth\"}"); return; }
+    char b[96];
+    snprintf(b, sizeof(b), "{\"m\":%u,\"hue\":%u,\"bri\":%u,\"rt\":%u}",
+             led.mode, led.hue, led.bri, led.rate);
+    http.send(200, "application/json", b);
+  });
+#endif
   http.on("/", []() { http.send_P(200, "text/html", PAGE); });
   http.onNotFound([]() { http.send_P(200, "text/html", PAGE); });  // captive catch-all
   http.begin();
   ws.begin();
+  // Heartbeat: ping every 15s, pong within 3s, drop after 2 misses. Phones that
+  // lock their screen kill the socket silently; without this the dead client
+  // holds one of the library's 5 server slots until TCP timeout, and after a
+  // few lock/refresh cycles new connections are refused or flaky.
+  ws.enableHeartbeat(15000, 3000, 2);
   ws.onEvent(onWsEvent);
 }
 
@@ -1158,6 +1686,7 @@ void initWiFi() {
   }
 
   if (connected) {
+    WiFi.setSleep(false);   // modem sleep adds latency and drops with phones
     netMode = "STA";
     netIp = WiFi.localIP().toString();
     captiveActive = false;
@@ -1168,6 +1697,7 @@ void initWiFi() {
     WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
     if (apPass.length() >= 8) WiFi.softAP(apSsid.c_str(), apPass.c_str());
     else                      WiFi.softAP(apSsid.c_str());   // open if too short
+    WiFi.setSleep(false);   // modem sleep adds latency and drops with phones
     netMode = "AP";
     netIp = WiFi.softAPIP().toString();
     dns.start(53, "*", WiFi.softAPIP());   // captive portal: any host -> our page
@@ -1254,6 +1784,14 @@ void setup() {
   loadSettings();           // restore mode + ceiling from NVS
   loadMotion();             // restore motion config + mode queue
 
+#ifdef ENABLE_LEDS
+  pixels.begin();
+  pixels.clear();
+  pixels.show();            // dark until the first ledTask frame
+  loadLed();
+  Serial.println("[boot] leds: chained rings on GPIO20");
+#endif
+
 #ifdef INPUT_TOF_WIFI
   initWiFi();   // WiFi init last
 #endif
@@ -1298,6 +1836,12 @@ void loop() {
 #ifdef USES_TOF
   static uint32_t tTof = 0;
   if (now - tTof >= 33) { tTof = now; gestureTick(); }
+#endif
+
+#ifdef ENABLE_LEDS
+  // LED animation: ~30Hz. Skipped during OTA so flashing gets full bandwidth.
+  static uint32_t tLed = 0;
+  if (now - tLed >= 33 && !otaActive) { tLed = now; ledTask(); }
 #endif
 
   // Health poll: 2Hz.
