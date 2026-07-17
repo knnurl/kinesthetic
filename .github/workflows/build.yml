@@ -37,7 +37,8 @@ jobs:
             "FastAccelStepper" \
             "TMCStepper" \
             "WebSockets" \
-            "ArduinoJson"
+            "ArduinoJson" \
+            "Adafruit NeoPixel"
 
       - name: Force INPUT_TOF_WIFI build flag
         run: |
@@ -71,6 +72,18 @@ jobs:
           fi
           grep -nE 'void[[:space:]]+(setup|loop)[[:space:]]*\(\)' kinetic_sculpture.ino \
             || { echo "ERROR: no setup()/loop() - wrong or empty .ino at repo root"; exit 1; }
+          # The embedded JavaScript must parse: a syntax error here ships a dead UI.
+          sed -n '/<script>/,/<\/script>/p' page.h | sed '1d;$d' > /tmp/app.js
+          node --check /tmp/app.js || { echo "ERROR: page.h JavaScript has a syntax error."; exit 1; }
+          # Firmware mode count and UI mode chips must agree (the static_assert
+          # guards the firmware side; this guards the page side).
+          fwn=$(grep -oE 'MODE_COUNT == [0-9]+' kinetic_sculpture.ino | grep -oE '[0-9]+')
+          uin=$(grep -oE 'id="m[0-9]+"' page.h | sort -u | wc -l)
+          echo "== mode count: firmware=$fwn ui_chips=$uin =="
+          if [ "$fwn" != "$uin" ]; then
+            echo "ERROR: firmware declares $fwn modes but page.h has $uin mode chips."
+            exit 1
+          fi
           mkdir -p sketch/kinetic_sculpture
           cp kinetic_sculpture.ino sketch/kinetic_sculpture/kinetic_sculpture.ino
           cp page.h               sketch/kinetic_sculpture/page.h
