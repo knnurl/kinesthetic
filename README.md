@@ -36,7 +36,7 @@ Repeat for each board. Each one comes up with a unique name automatically
 ## First boot and joining WiFi
 
 - On first boot the board starts its own access point named
-  `KineticSculpture-XXXX` (XXXX = unique per board) at `192.168.4.1`.
+  `Kinesthetic-XXXX` (XXXX = unique per board) at `192.168.4.1`.
 - Join that AP, the control page opens automatically.
 - Go to Setup -> Join wifi, enter your network, Save. The board reboots onto
   your WiFi and is reachable at `sculpture-XXXX.local`.
@@ -44,6 +44,69 @@ Repeat for each board. Each one comes up with a unique name automatically
 Because the AP name and hostname both carry a per-board suffix derived from the
 chip ID, multiple boards never collide. You can rename any board in Setup if you
 want friendlier names (e.g. `sculpture-lobby`).
+
+## Using it
+
+The control page has tabs across the top. The essentials:
+
+- **Control** - the speed/direction slider (bidirectional, centre is stop) and the
+  movement mode grid. Enable the motor with the big button.
+- **Motion** - tune the feel of each mode (cycle durations, ramp/dwell shaping) or
+  pick a preset (Calm, Balanced, Lively, Hypnotic). Also the mode queue, a timed
+  playlist that steps through modes and loops.
+- **Light** - LED ring modes (if fitted): Solid, Glow (breathes with real speed),
+  Chase (spins with the discs), Rainbow.
+- **Fleet** - control several sculptures from one page, plus the swarm designer.
+- **Setup / Help** - networking, appearance, password, firmware, and a gesture and
+  mode reference.
+
+### Movement modes
+
+Manual (you drive), Breathe, Sweep, Wander, Tide, Pendulum, Heartbeat, Stutter.
+In every mode except Manual the slider's distance from centre sets the top speed
+the movement builds to, and which side sets its direction. Tap the `?` in the mode
+grid for a full description of each.
+
+Hand gestures (ToF sensor): move your hand to control speed, hold still then
+withdraw to change mode (2-5s), enable/disable (5-15s), or reset networking (15s+).
+
+### Fleet: control many sculptures from one page
+
+Open any sculpture's page, go to Fleet, and add the others by address
+(`sculpture-XXXX.local` or IP). Peers sharing this board's interface password
+unlock automatically. The roster is stored on the boards themselves, so opening
+any device's page shows the whole fleet. "Mirror my controls" sends every change
+you make to all of them; "Enable all" / "Stop all" and "Send mode + speed to all"
+are one-shot broadcasts.
+
+### Swarm: many sculptures as one wall
+
+Imagine a grid of these on a wall moving as a single organism. The swarm turns
+motion into a *field function* of each device's position and a shared clock, so
+the wall runs travelling waves, ripples, and flocking instead of each unit doing
+its own thing.
+
+How it works: one device is the **conductor**. It broadcasts a small UDP clock
+beacon on the LAN carrying the pattern and its parameters; every other device
+syncs its clock to the conductor and runs the same maths locally at its own stored
+wall position. The result is phase-locked with almost no network traffic, and it
+keeps running even if you close the control page.
+
+To set it up (all boards on the same WiFi):
+
+1. Fleet tab -> add the other sculptures.
+2. In the **Swarm** card, tap **Link devices** once (shares a swarm key), then drag
+   each dot on the layout to where that sculpture physically sits, or tap
+   **Arrange in a row**.
+3. Mark one sculpture as conductor (the **C** button in the list, or "this
+   sculpture is the conductor").
+4. Pick a pattern (Unison, Wave, Ripple, Cascade, Flock), set amplitude and the
+   pattern sliders, and tap **Engage swarm**. The live preview animates the exact
+   motion the wall will run.
+
+Once engaged, the Control tab's speed slider drives the whole wall's amplitude in
+one move (toggle in the Swarm card, on by default). With the ToF sensor, a hand
+wave at any one sculpture radiates a ripple across all of them.
 
 ## Wireless updates (push to GitHub, update from phone)
 
