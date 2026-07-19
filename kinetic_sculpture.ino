@@ -64,6 +64,7 @@
 
 #ifdef INPUT_TOF_WIFI
 #include <WiFi.h>
+#include <WiFiUdp.h>       // swarm clock beacon + gesture pings (built-in)
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -245,6 +246,44 @@ uint8_t  queueIdx = 0;
 uint32_t queueStepStart = 0;
 bool     queueOffPending = false;   // set when firmware cancels the queue; the
                                     // WiFi build broadcasts it once to sync the UI
+
+// ---------- Swarm (multi-device choreography) ----------
+// Motion becomes a field function: target = amplitude * pattern(x, y, sharedTime).
+// One device (the conductor) broadcasts a UDP clock beacon carrying the pattern
+// parameters; followers sync their clock to it and run the same math at their own
+// stored wall position, so many sculptures move as one installation with zero
+// per-tick network traffic. The pattern math is shared core; only the network
+// layer is WiFi-build specific. In the other builds SWARM simply never engages
+// because no beacon ever arrives.
+#define SWARM_UDP_PORT      47269
+#define SWARM_MAGIC         0x4B535731UL  // 'KSW1'
+#define SWARM_TIMEOUT_MS    3000    // no beacon for this long: follower holds at 0
+#define SWARM_BEACON_MS     500     // conductor beacon cadence (2 Hz)
+#define SWARM_PATTERNS      5       // unison, wave, ripple, cascade, flock
+#define SWARM_PING_MAX      4       // concurrent gesture ripples remembered
+#define SWARM_PING_PERIOD_S 4.0f    // gesture ripple ring period
+#define SWARM_PING_SPACING  0.4f    // gesture ripple ring spacing (wall units)
+#define SWARM_PING_DECAY_S  8.0f    // gesture ripple lifetime
+
+float    swarmX = 0.5f, swarmY = 0.5f;  // wall position 0..1, NVS sw_x / sw_y
+bool     swarmConductor = false;        // NVS sw_cond
+uint32_t swarmKey = 0;                  // shared packet key, NVS sw_key
+bool     swarmActive = false;           // engaged (runtime only, never persisted)
+bool     swarmMuted  = false;           // local user override: ignore active beacons
+uint8_t  swarmPatternId = 1;
+float    swarmAmp = 0.5f;
+float    swarmP[4] = { 12.0f, 0.8f, 0.0f, 0.0f };
+bool     swarmCeilAuto = false;         // ceiling was auto-seeded from amplitude and
+                                        // keeps following it until a human sets a cap
+int32_t  swarmClkOff = 0;               // sharedMillis() = millis() + offset
+uint32_t swarmLastBeacon = 0;           // millis() of last accepted beacon
+uint8_t  swarmReleaseBeacons = 0;       // conductor: beacons still to send after release
+struct SwarmPingSlot { uint32_t t; float x, y; bool used; };
+SwarmPingSlot swarmPings[SWARM_PING_MAX] = {};
+uint32_t sharedMillis() { return millis() + (uint32_t)swarmClkOff; }
+#ifdef INPUT_TOF_WIFI
+void swarmGesturePing();   // defined with the network layer below
+#endif
 
 #define CROSSFADE_MS 1000          // mode change envelope blend duration
 
@@ -502,6 +541,81 @@ int modeStutter(uint32_t now, int cap, bool entered) {
   return dir * f;
 }
 
+// ---------- Swarm pattern field ----------
+// Pure functions of (x, y, sharedTime, params): every device computes an
+// identical value for identical inputs. No device-local state, no randomness,
+// no iteration-order dependence. KEEP IN SYNC WITH swarmPattern() in page.h;
+// the browser preview runs this exact math, so the canvas IS the wall.
+// sn() works in cycles with the fraction taken in double precision, so phase
+// stays accurate no matter how large sharedMillis grows (a float mantissa
+// would start visibly jittering after a few hours of uptime).
+static float sn(double ph) { ph -= floor(ph); return sinf((float)(ph * 6.283185307179586)); }
+
+float swarmPattern(uint8_t id, float x, float y, double t, const float *p) {
+  float p0 = p[0] < 0.5f ? 0.5f : p[0];    // period never zero
+  float p1 = p[1] < 0.05f ? 0.05f : p[1];  // wavelength / spacing / width never zero
+  switch (id) {
+    case 0:                                                       // UNISON
+      return sn(t / p0);
+    case 1:                                                       // WAVE
+      // Travelling wave: a crest sweeps the wall along direction p2 (radians).
+      return sn(t / p0 - (x * cosf(p[2]) + y * sinf(p[2])) / p1);
+    case 2: {                                                     // RIPPLE
+      // Expanding rings from source (p2, p3), phase lags with distance.
+      float dx = x - p[2], dy = y - p[3];
+      return sn(t / p0 - sqrtf(dx * dx + dy * dy) / p1);
+    }
+    case 3: {                                                     // CASCADE
+      // Devices fire in sequence down the line: a raised-cosine pulse of
+      // width p1 travels through each device's x rank once per cycle.
+      double phd = t / p0; phd -= floor(phd);
+      float d = (float)phd - x; d -= floorf(d);                   // 0..1
+      if (d > 0.5f) d -= 1.0f;                                    // -0.5..0.5
+      if (fabsf(d) > p1) return 0.0f;
+      return 0.5f * (1.0f + cosf(PI * d / p1));
+    }
+    case 4: {                                                     // FLOCK
+      // Correlated organic drift: three incommensurate sines (the modeWander
+      // trick) sampled at each device's position. Neighbours move alike but
+      // not identically; p1 scales how fast likeness falls off with distance.
+      float s = p1;
+      return 0.50f * sn(t / p0            + s * (0.81f * x + 0.27f * y))
+           + 0.35f * sn(t / (p0 * 0.618f) + s * (0.37f * x + 1.26f * y))
+           + 0.15f * sn(t / (p0 * 0.382f) + s * (1.50f * x + 0.49f * y));
+    }
+  }
+  return 0.0f;
+}
+
+// Gesture ripples (interactive layer): expanding rings from recent hand pings,
+// summed on top of the base pattern. An empty buffer costs only the loop test.
+float swarmOverlay(uint32_t nowShared) {
+  float sum = 0.0f;
+  for (uint8_t i = 0; i < SWARM_PING_MAX; i++) {
+    if (!swarmPings[i].used) continue;
+    float age = (int32_t)(nowShared - swarmPings[i].t) / 1000.0f;
+    if (age < 0.0f || age > SWARM_PING_DECAY_S) { swarmPings[i].used = false; continue; }
+    float dx = swarmX - swarmPings[i].x, dy = swarmY - swarmPings[i].y;
+    float dd = sqrtf(dx * dx + dy * dy);
+    sum += expf(-age / SWARM_PING_DECAY_S) *
+           sinf(TWO_PI * (age / SWARM_PING_PERIOD_S - dd / SWARM_PING_SPACING));
+  }
+  return sum;
+}
+
+int modeSwarm(uint32_t now, int cap, bool entered) {
+  (void)now; (void)entered;
+  // A follower that has lost (or never had) the conductor holds still; the
+  // motion tracker turns this hard zero into a gentle ramp down.
+  if (!swarmConductor &&
+      (swarmLastBeacon == 0 || millis() - swarmLastBeacon > SWARM_TIMEOUT_MS)) return 0;
+  uint32_t st = sharedMillis();
+  float v = swarmPattern(swarmPatternId, swarmX, swarmY, (double)st / 1000.0, swarmP);
+  v += swarmOverlay(st);
+  if (v > 1.0f) v = 1.0f; else if (v < -1.0f) v = -1.0f;
+  return (int)(v * swarmAmp * cap);
+}
+
 struct ModeDef {
   const char *name;
   ModeFn      fn;
@@ -517,8 +631,10 @@ const ModeDef MODES[] = {
   { "PENDULUM",  modePendulum,  true  },
   { "HEARTBEAT", modeHeartbeat, true  },
   { "STUTTER",   modeStutter,   true  },
+  { "SWARM",     modeSwarm,     true  },   // engaged from the Fleet tab, not the mode grid
 };
 const uint8_t MODE_COUNT = sizeof(MODES) / sizeof(MODES[0]);
+#define MODE_SWARM (MODE_COUNT - 1)  // swarm rides the normal mode pipeline as the last entry
 
 // Ceiling for a given mode, floored to the runtime minimum unless the mode is
 // exempt. cfg.minSpeed = 0 lets auto modes be starved to a standstill, which is
@@ -820,10 +936,16 @@ void loadSettings() {
   migrateConfig();          // upgrade NVS written by older firmware first
   mode = prefs.getUChar("mode", MANUAL);
   if (mode >= MODE_COUNT) mode = MANUAL;
-  maxSpeedCeiling = prefs.getInt("ceil", 0);   // 0 on a fresh board: slider at rest
-  if (maxSpeedCeiling < 0) maxSpeedCeiling = 0;
-  if (maxSpeedCeiling > FREQ_MAX) maxSpeedCeiling = FREQ_MAX;
+  if (mode == MODE_SWARM) mode = MANUAL;   // swarm engagement is never persisted
+  maxSpeedCeiling = 0;   // always boot with the slider at rest (speed 0), regardless of NVS
+  // Swarm identity persists; swarm engagement does not.
+  swarmX = prefs.getFloat("sw_x", 0.5f);
+  swarmY = prefs.getFloat("sw_y", 0.5f);
+  swarmConductor = prefs.getBool("sw_cond", false);
+  swarmKey = prefs.getUInt("sw_key", 0);
   Serial.printf("[nvs] restored mode=%u ceil=%d\n", mode, maxSpeedCeiling);
+  Serial.printf("[swarm] pos=%.2f,%.2f role=%s\n", swarmX, swarmY,
+                swarmConductor ? "conductor" : "follower");
 }
 
 // ----- Motion config + mode queue persistence -----
@@ -838,7 +960,7 @@ void parseQueue(const String &s) {
     if (colon > 0) {
       int m = tok.substring(0, colon).toInt();
       int sec = tok.substring(colon + 1).toInt();
-      if (m < 0) m = 0; if (m >= MODE_COUNT) m = MODE_COUNT - 1;
+      if (m < 0) m = 0; if (m >= MODE_COUNT - 1) m = MODE_COUNT - 2;   // SWARM is not queueable
       if (sec < 1) sec = 1; if (sec > 3600) sec = 3600;
       queueSteps[queueLen].mode = m;
       queueSteps[queueLen].secs = sec;
@@ -920,7 +1042,45 @@ void cancelQueue(const char *why) {
 void userSelectMode(uint8_t m) {
   cancelQueue("mode selected directly");
   if (m >= MODE_COUNT) m = 0;
+  // A direct local choice always wins on this device. Leaving SWARM mutes this
+  // device against active beacons until the swarm is released and re-engaged;
+  // on the conductor it releases the whole swarm.
+  if (mode == MODE_SWARM && m != MODE_SWARM) {
+    swarmMuted = true;
+    swarmActive = false;
+    if (swarmConductor) swarmReleaseBeacons = 6;   // WiFi build: tell the followers
+  }
   mode = m;
+}
+
+// Engage or release swarm on this device. Engage seeds the local speed ceiling
+// from the choreography amplitude when the slider is at rest, because the
+// ceiling deliberately boots to 0 and nobody wants to walk a wall of ten
+// sculptures raising every slider by hand. The local slider stays a hard cap:
+// pulling it to 0 mid-swarm silences this device only.
+// While the ceiling is auto-managed, it tracks the choreography amplitude so
+// raising the amplitude mid-swarm actually speeds the wall up instead of
+// hitting the engage-time seed. A human touching the local slider (speed
+// command) reclaims the cap and turns auto-follow off for this device.
+void swarmApplyAutoCeil() {
+  if (!swarmCeilAuto) return;
+  int pct = (int)(swarmAmp * 100.0f);
+  if (pct < 1) pct = 1;
+  maxSpeedCeiling = map(pct, 1, 100, MANUAL_MIN_MOVE, FREQ_MAX);
+}
+
+void swarmSetActive(bool on) {
+  if (on) {
+    cancelQueue("swarm");
+    swarmMuted = false;
+    if (maxSpeedCeiling == 0) swarmCeilAuto = true;
+    swarmApplyAutoCeil();
+    mode = MODE_SWARM;
+    swarmActive = true;
+  } else {
+    swarmActive = false;
+    if (mode == MODE_SWARM) { mode = MANUAL; manualSpeed = 0; }
+  }
 }
 
 void persistTask() {
@@ -989,7 +1149,7 @@ void pollPotButtons() {
   int r = digitalRead(MODE_BTN);
   if (last == HIGH && r == LOW && millis() - t0 > DEBOUNCE_MS) {
     t0 = millis();
-    userSelectMode((mode + 1) % MODE_COUNT);
+    userSelectMode((mode + 1) % (MODE_COUNT - 1));   // cycle the real modes; SWARM is not in the rotation
     Serial.printf("[mode] -> %u\n", mode);
   }
   last = r;
@@ -1143,7 +1303,7 @@ int ceilingFromDist(int d) {
 }
 
 void fireModeChange() {
-  userSelectMode((mode + 1) % MODE_COUNT);
+  userSelectMode((mode + 1) % (MODE_COUNT - 1));   // cycle the real modes; SWARM is not in the rotation
   Serial.printf("[gesture] mode change -> %u\n", mode);
 }
 
@@ -1171,6 +1331,10 @@ void fireNetworkReset() {
 
 void applySpeedControl() {
   // Live mapping while in SPEED_CONTROL, mode dependent.
+  // In SWARM the choreography owns the speed: a brief hand pass must not yank
+  // the ceiling. The hand becomes a ripple source instead (swarmGesturePing);
+  // the longer hold gestures (mode change, enable, reset) still work.
+  if (mode == MODE_SWARM) return;
   if (mode == MANUAL) {
     int s = manualSpeedFromDist(filtDist);
     manualSpeed = s;
@@ -1219,6 +1383,9 @@ void gestureTick() {
       // Motor ignores the hand completely here. No speed changes.
       if (abs(d - entryDist) > 30) {
         gstate = G_SPEED;                 // movement confirmed: speed control now
+#ifdef INPUT_TOF_WIFI
+        swarmGesturePing();               // in swarm: this hand becomes a ripple source
+#endif
         // Auto enable if disabled, then control speed.
         if (!motorEnabled) {
           motorEnabled = true;
@@ -1285,7 +1452,7 @@ DNSServer        dns;
 #define DEF_AP_PASS "kinetic123"
 #define DEF_HOST    "sculpture"
 #define OTA_PASS    "kinetic"    // required by the IDE when uploading over WiFi
-#define FW_VERSION  "2.1.2"      // shown in the UI; bump on each release
+#define FW_VERSION  "2.2.0"      // shown in the UI; bump on each release
 
 // Loaded network settings + live status.
 String    apSsid, apPass, staSsid, staPass, hostName;
@@ -1293,11 +1460,16 @@ IPAddress apIP, staIP, staGw, staMask;
 bool      useSta = false, useStatic = false, captiveActive = false;
 String    netMode = "AP", netIp = "0.0.0.0";
 String    fwUrl = "";              // GitHub (or other) .bin URL for pull updates
+String    fleetList = "";          // shared fleet roster (comma separated hosts), NVS
+                                   // fl_list; lets any device's page rebuild the whole
+                                   // fleet view instead of relying on one phone's storage
 void performOtaPull(const String &url);   // defined below, called from the WS handler
 
 // The web app hardcodes one button per mode. If MODE_COUNT changes, the buttons
 // in PAGE must change too. This catches the mismatch at build time.
-static_assert(MODE_COUNT == 8, "web app PAGE has 8 mode buttons; update it to match MODE_COUNT");
+// The web app grid has one chip per real mode; SWARM (the last table entry) is
+// engaged from the Fleet tab instead and deliberately has no chip.
+static_assert(MODE_COUNT == 9, "web app PAGE has 8 mode chips + SWARM; update page.h to match MODE_COUNT");
 
 // The web app (HTML/CSS/JS) lives in page.h as a PROGMEM raw string literal.
 // It must stay in a header. The Arduino IDE / arduino-cli ctags prototype
@@ -1329,6 +1501,127 @@ void wsSendAll(const String &msg) {
 void wsSendAll(const char *msg) { wsSendAll(String(msg)); }
 
 bool httpAuthed() { return !authRequired() || http.arg("t") == uiToken; }
+
+// ---------- Swarm network layer (UDP clock beacon + gesture pings) ----------
+// Binary little-endian packets on a broadcast socket. The shared key is cheap
+// insurance against a stray device on the LAN, not cryptography; commands that
+// change swarm state ride the authenticated WebSocket.
+WiFiUDP swarmUdp;
+struct __attribute__((packed)) SwarmHdr { uint32_t magic; uint32_t key; };
+struct __attribute__((packed)) SwarmBeacon {
+  SwarmHdr hdr;
+  uint8_t  type;        // 1 = beacon
+  uint8_t  pattern;
+  uint8_t  active;      // 1 = swarm engaged, 0 = released
+  uint8_t  seq;         // debug only
+  uint32_t t;           // conductor sharedTime in ms (its millis)
+  float    amplitude;
+  float    p0, p1, p2, p3;
+};
+struct __attribute__((packed)) SwarmPing {
+  SwarmHdr hdr;
+  uint8_t  type;        // 2 = ping
+  uint8_t  pad[3];
+  uint32_t t;           // sender sharedTime at the gesture
+  float    x, y;        // sender wall position
+};
+uint8_t swarmSeq = 0;
+
+void sendSwarmBeacon() {
+  SwarmBeacon b;
+  b.hdr.magic = SWARM_MAGIC; b.hdr.key = swarmKey;
+  b.type = 1; b.pattern = swarmPatternId;
+  b.active = swarmActive ? 1 : 0; b.seq = swarmSeq++;
+  b.t = millis();               // the conductor's clock offset is 0 by definition
+  b.amplitude = swarmAmp;
+  b.p0 = swarmP[0]; b.p1 = swarmP[1]; b.p2 = swarmP[2]; b.p3 = swarmP[3];
+  swarmUdp.beginPacket(IPAddress(255, 255, 255, 255), SWARM_UDP_PORT);
+  swarmUdp.write((const uint8_t *)&b, sizeof(b));
+  swarmUdp.endPacket();
+}
+
+void swarmStorePing(uint32_t t, float x, float y) {
+  uint8_t slot = 0; uint32_t oldest = 0xFFFFFFFF;
+  for (uint8_t i = 0; i < SWARM_PING_MAX; i++) {
+    if (!swarmPings[i].used) { slot = i; break; }
+    if (swarmPings[i].t < oldest) { oldest = swarmPings[i].t; slot = i; }
+  }
+  swarmPings[slot] = { t, x, y, true };
+}
+
+// Hand gesture on a swarming device: broadcast a ripple source. Every device
+// folds it into its overlay; ours is stored directly because own broadcasts
+// are ignored on receive. Rate limited so a waving hand is one ripple, not ten.
+void swarmGesturePing() {
+  static uint32_t tLast = 0;
+  if (mode != MODE_SWARM || !swarmActive) return;
+  uint32_t now = millis();
+  if (tLast && now - tLast < 1000) return;
+  tLast = now;
+  SwarmPing p;
+  p.hdr.magic = SWARM_MAGIC; p.hdr.key = swarmKey;
+  p.type = 2; p.pad[0] = p.pad[1] = p.pad[2] = 0;
+  p.t = sharedMillis(); p.x = swarmX; p.y = swarmY;
+  swarmUdp.beginPacket(IPAddress(255, 255, 255, 255), SWARM_UDP_PORT);
+  swarmUdp.write((const uint8_t *)&p, sizeof(p));
+  swarmUdp.endPacket();
+  swarmStorePing(p.t, p.x, p.y);
+  Serial.println("[swarm] gesture ping sent");
+}
+
+// Non-blocking receive, called every loop pass. Cheap when idle: parsePacket()
+// returns 0 immediately when nothing is waiting.
+void swarmNetTask() {
+  int len = swarmUdp.parsePacket();
+  if (len <= 0) return;
+  uint8_t buf[64] __attribute__((aligned(4)));
+  if (len > (int)sizeof(buf)) { swarmUdp.flush(); return; }
+  swarmUdp.read(buf, len);
+  if (len < (int)(sizeof(SwarmHdr) + 1)) return;
+  SwarmHdr *h = (SwarmHdr *)buf;
+  if (h->magic != SWARM_MAGIC || h->key != swarmKey) return;
+  uint8_t type = buf[sizeof(SwarmHdr)];
+
+  if (type == 1 && len >= (int)sizeof(SwarmBeacon)) {
+    if (swarmConductor) return;              // our own broadcast, looped back
+    SwarmBeacon *b = (SwarmBeacon *)buf;
+    uint32_t now = millis();
+    // Clock sync: snap on the first beacon from a (re)appearing conductor,
+    // then low-pass. ASSUMPTION: one-way LAN latency (~1-5ms) plus tracker
+    // smoothing keeps residual error far below what the eye can see.
+    int32_t raw = (int32_t)(b->t - now);
+    if (swarmLastBeacon == 0 || now - swarmLastBeacon > SWARM_TIMEOUT_MS)
+      swarmClkOff = raw;
+    else
+      swarmClkOff += (int32_t)((raw - swarmClkOff) * 0.1f);
+    swarmLastBeacon = now;
+    swarmPatternId = b->pattern < SWARM_PATTERNS ? b->pattern : 0;
+    swarmAmp = constrain(b->amplitude, 0.0f, 1.0f);
+    swarmP[0] = b->p0; swarmP[1] = b->p1; swarmP[2] = b->p2; swarmP[3] = b->p3;
+    if (b->active) {
+      if (!swarmMuted) {
+        if (mode != MODE_SWARM) swarmSetActive(true);   // followers engage via beacon
+        else swarmActive = true;
+      }
+    } else {
+      swarmMuted = false;                    // a release re-arms a muted device
+      if (mode == MODE_SWARM || swarmActive) swarmSetActive(false);
+    }
+    if (swarmActive) swarmApplyAutoCeil();   // amplitude changes reach auto-capped devices
+    static uint32_t tLog = 0;
+    if (now - tLog >= 5000) {
+      tLog = now;
+      Serial.printf("[swarm] beacon rx off=%ld act=%u pat=%u\n",
+                    (long)swarmClkOff, b->active, b->pattern);
+    }
+  } else if (type == 2 && len >= (int)sizeof(SwarmPing)) {
+    IPAddress rip = swarmUdp.remoteIP();
+    if (rip == WiFi.localIP() || rip == WiFi.softAPIP()) return;   // own ping
+    SwarmPing *p = (SwarmPing *)buf;
+    swarmStorePing(p->t, constrain(p->x, 0.0f, 1.0f), constrain(p->y, 0.0f, 1.0f));
+    Serial.println("[swarm] gesture ping rx");
+  }
+}
 
 void onWsEvent(uint8_t n, WStype_t type, uint8_t *payload, size_t len) {
   if (type == WStype_CONNECTED) {
@@ -1389,6 +1682,7 @@ void onWsEvent(uint8_t n, WStype_t type, uint8_t *payload, size_t len) {
     // slider is not a dead zone (1-2% used to command < start speed).
     int mag = (pct == 0) ? 0 : map(abs(pct), 1, 100, MANUAL_MIN_MOVE, FREQ_MAX);
     maxSpeedCeiling = mag;
+    swarmCeilAuto = false;   // a human set this device's cap; stop amplitude-follow
     lastSliderPct = pct;
     if (pct > 0) lastManualDir = 1; else if (pct < 0) lastManualDir = -1;   // 0 keeps last
     if (mode == MANUAL) manualSpeed = (pct >= 0) ? mag : -mag;
@@ -1431,7 +1725,7 @@ void onWsEvent(uint8_t n, WStype_t type, uint8_t *payload, size_t len) {
     JsonArrayConst qa = d["q"].as<JsonArrayConst>();
     for (JsonVariantConst st : qa) {
       if (queueLen >= QUEUE_MAX) break;
-      queueSteps[queueLen].mode = constrain((int)(st[0] | 0), 0, MODE_COUNT - 1);
+      queueSteps[queueLen].mode = constrain((int)(st[0] | 0), 0, MODE_COUNT - 2);   // SWARM is not queueable
       queueSteps[queueLen].secs = constrain((int)(st[1] | 10), 1, 3600);
       queueLen++;
     }
@@ -1446,6 +1740,54 @@ void onWsEvent(uint8_t n, WStype_t type, uint8_t *payload, size_t len) {
       prefs.putString("fw_url", fwUrl);
       performOtaPull(fwUrl);
     }
+  } else if (!strcmp(c, "fleet")) {
+    // Shared roster: the page pushes the full list of sculpture addresses to
+    // every device it can reach, so opening ANY device's page shows the whole
+    // fleet (the list used to live only in one phone's localStorage).
+    String fl = "";
+    JsonArrayConst la = d["l"].as<JsonArrayConst>();
+    for (JsonVariantConst v : la) {
+      const char *hs = v | "";
+      if (!strlen(hs)) continue;
+      if (strchr(hs, '"') || strchr(hs, ',')) continue;   // keep NVS + JSON clean
+      if (fl.length() + strlen(hs) + 1 > 480) break;
+      if (fl.length()) fl += ",";
+      fl += hs;
+    }
+    fleetList = fl;
+    prefs.putString("fl_list", fleetList);
+    Serial.printf("[fleet] roster saved (%d bytes)\n", fleetList.length());
+  } else if (!strcmp(c, "swarmpos")) {
+    swarmX = constrain((float)(d["x"] | 0.5f), 0.0f, 1.0f);
+    swarmY = constrain((float)(d["y"] | 0.5f), 0.0f, 1.0f);
+    prefs.putFloat("sw_x", swarmX);
+    prefs.putFloat("sw_y", swarmY);
+    Serial.printf("[swarm] pos=%.2f,%.2f\n", swarmX, swarmY);
+  } else if (!strcmp(c, "swarmrole")) {
+    swarmConductor = d["conductor"] | false;
+    prefs.putBool("sw_cond", swarmConductor);
+    if (swarmConductor) { swarmClkOff = 0; swarmLastBeacon = 0; }   // conductor time IS shared time
+    else swarmActive = false;
+    Serial.printf("[swarm] role=%s\n", swarmConductor ? "conductor" : "follower");
+  } else if (!strcmp(c, "swarmkey")) {
+    swarmKey = (uint32_t)(d["v"] | 0);
+    prefs.putUInt("sw_key", swarmKey);
+    Serial.println("[swarm] key set");
+  } else if (!strcmp(c, "swarm")) {
+    // Choreography lives on the conductor; the UDP beacon fans it out.
+    if (!swarmConductor) { ws.sendTXT(n, "{\"type\":\"err\",\"m\":\"not conductor\"}"); return; }
+    swarmPatternId = (uint8_t)constrain((int)(d["pat"] | (int)swarmPatternId), 0, SWARM_PATTERNS - 1);
+    swarmAmp  = constrain((float)(d["amp"] | swarmAmp), 0.0f, 1.0f);
+    swarmP[0] = d["p0"] | swarmP[0];
+    swarmP[1] = d["p1"] | swarmP[1];
+    swarmP[2] = d["p2"] | swarmP[2];
+    swarmP[3] = d["p3"] | swarmP[3];
+    bool on = d["on"] | swarmActive;
+    if (on) swarmSetActive(true);
+    else if (swarmActive || mode == MODE_SWARM) { swarmSetActive(false); swarmReleaseBeacons = 6; }
+    sendSwarmBeacon();   // params and engage state reach the wall immediately
+    Serial.printf("[swarm] %s pat=%u amp=%.2f\n", on ? "engaged" : "released",
+                  swarmPatternId, swarmAmp);
   }
 #ifdef ENABLE_LEDS
   else if (!strcmp(c, "led")) {
@@ -1481,18 +1823,23 @@ void sendTelemetry() {
     queueOffPending = false;
     wsSendAll("{\"type\":\"queueoff\"}");
   }
-  char buf[352];
+  char buf[512];   // grown for the swarm block; snprintf truncates silently if undersized
   snprintf(buf, sizeof(buf),
     "{\"type\":\"tele\",\"mode\":%u,\"enabled\":%s,\"speed\":%d,\"qi\":%d,\"gesture\":\"%s\","
     "\"derate\":%d,\"fault\":{\"tmc\":%s,\"otp\":%s,\"tof\":%s},\"sg\":%u,"
-    "\"netmode\":\"%s\",\"netip\":\"%s\",\"sl\":%d,\"leds\":" LEDS_JSON "}",
+    "\"netmode\":\"%s\",\"netip\":\"%s\",\"sl\":%d,"
+    "\"sw\":{\"on\":%d,\"cond\":%d,\"sync\":%d,\"x\":%.2f,\"y\":%.2f,\"pat\":%u,\"amp\":%.2f},"
+    "\"leds\":" LEDS_JSON "}",
     mode, motorEnabled ? "true" : "false", appliedFreq,
     (queueEnabled && queueLen && queueStepStart) ? (int)queueIdx : -1, gestureName(),
     (int)(speedDerate * 100),
     faultTmcComm ? "true" : "false",
     faultOvertemp ? "true" : "false",
     faultTof ? "true" : "false",
-    sgLoad, netMode.c_str(), netIp.c_str(), sliderPctForTele());
+    sgLoad, netMode.c_str(), netIp.c_str(), sliderPctForTele(),
+    (mode == MODE_SWARM) ? 1 : 0, swarmConductor ? 1 : 0,
+    (swarmConductor || (swarmLastBeacon && millis() - swarmLastBeacon < SWARM_TIMEOUT_MS)) ? 1 : 0,
+    swarmX, swarmY, swarmPatternId, swarmAmp);
   wsSendAll(buf);
 }
 
@@ -1520,6 +1867,7 @@ void loadNetSettings() {
   staGw.fromString(prefs.getString("sta_gw", "0.0.0.0"));
   staMask.fromString(prefs.getString("sta_mask", "255.255.255.0"));
   fwUrl = prefs.getString("fw_url", "");
+  fleetList = prefs.getString("fl_list", "");
 }
 
 // Pull a firmware .bin from a URL (e.g. a GitHub release) and self-install.
@@ -1695,6 +2043,20 @@ void startServers() {
       queueEnabled ? "true" : "false", q.c_str());
     http.send(200, "application/json", b);
   });
+  http.on("/fleet", []() {
+    if (!httpAuthed()) { http.send(401, "application/json", "{\"err\":\"auth\"}"); return; }
+    String b = "{\"l\":[";
+    int i = 0;
+    while (i < (int)fleetList.length()) {
+      int cpos = fleetList.indexOf(',', i);
+      if (cpos < 0) cpos = fleetList.length();
+      if (i) b += ",";
+      b += "\"" + fleetList.substring(i, cpos) + "\"";
+      i = cpos + 1;
+    }
+    b += "]}";
+    http.send(200, "application/json", b);
+  });
 #ifdef ENABLE_LEDS
   http.on("/led", []() {
     if (!httpAuthed()) { http.send(401, "application/json", "{\"err\":\"auth\"}"); return; }
@@ -1714,6 +2076,7 @@ void startServers() {
   // few lock/refresh cycles new connections are refused or flaky.
   ws.enableHeartbeat(15000, 3000, 2);
   ws.onEvent(onWsEvent);
+  swarmUdp.begin(SWARM_UDP_PORT);   // swarm clock beacon + gesture ping channel
 }
 
 void initWiFi() {
@@ -1864,6 +2227,15 @@ void loop() {
   if (captiveActive) dns.processNextRequest();   // captive portal in AP mode
   http.handleClient();   // service web + websocket every pass
   ws.loop();
+  swarmNetTask();        // swarm UDP receive, non-blocking
+  // Conductor beacon: 2Hz while engaged, and a short trail of release beacons
+  // afterwards so every follower reliably sees the swarm end.
+  static uint32_t tBeacon = 0;
+  if (swarmConductor && (swarmActive || swarmReleaseBeacons) && now - tBeacon >= SWARM_BEACON_MS) {
+    tBeacon = now;
+    sendSwarmBeacon();
+    if (!swarmActive && swarmReleaseBeacons) swarmReleaseBeacons--;
+  }
   static uint32_t tNet = 0;
   if (now - tNet >= 1000) { tNet = now; netWatchdog(); }   // STA link supervision
 #endif

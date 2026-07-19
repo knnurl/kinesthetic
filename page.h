@@ -59,7 +59,7 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
 .chip{font-family:ui-monospace,Menlo,monospace;font-size:12px;letter-spacing:.12em;text-transform:uppercase;border:1px solid var(--line);border-radius:12px;padding:13px 0;color:var(--btntxt);background:var(--btn);text-align:center;transition:.25s}
 .chip.on{color:#fff;border-color:hsl(var(--h),85%,62%);background:hsla(var(--h),80%,55%,.16);box-shadow:0 0 22px hsla(var(--h),85%,55%,.35),inset 0 0 18px hsla(var(--h),85%,60%,.12)}
 .power{width:100%;font-family:ui-monospace,Menlo,monospace;font-size:14px;letter-spacing:.2em;text-transform:uppercase;border:1px solid var(--line);border-radius:14px;padding:16px;color:var(--btntxt);background:var(--btn);transition:.25s}
-.power.on{color:#fff;border-color:hsl(var(--h),85%,62%);background:hsla(var(--h),80%,55%,.2);box-shadow:0 0 30px hsla(var(--h),85%,55%,.5),inset 0 0 24px hsla(var(--h),85%,60%,.15)}
+.power.on{color:#06121f;font-weight:700;border-color:hsl(var(--h),85%,62%);background:hsl(var(--h),85%,62%);box-shadow:0 0 36px hsla(var(--h),85%,55%,.6),inset 0 0 24px hsla(var(--h),85%,65%,.25)}
 .ti{width:100%;padding:11px;margin-top:4px;border-radius:10px;border:1px solid var(--line);background:var(--inputbg);color:var(--mist);font-size:14px;font-family:ui-monospace,Menlo,monospace}
 .fr{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px}
 .fr .ti{width:96px;margin-top:0;text-align:right}
@@ -67,6 +67,7 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
 .nbtn{font-family:ui-monospace,Menlo,monospace;font-size:12px;letter-spacing:.1em;text-transform:uppercase;border:1px solid var(--line);border-radius:10px;padding:11px;color:var(--btntxt);background:var(--btn);text-align:center;cursor:pointer}
 .nbtn.on{color:#fff;border-color:hsl(var(--h),85%,62%);background:hsla(var(--h),80%,55%,.16)}
 .save{width:100%;margin-top:14px;font-family:ui-monospace,Menlo,monospace;letter-spacing:.15em;text-transform:uppercase;border:0;border-radius:12px;padding:13px;color:#06121f;font-weight:700;background:hsl(var(--h),85%,62%)}
+.save.ghost{background:transparent;color:hsl(var(--h),85%,62%);border:1px solid hsl(var(--h),85%,62%);font-weight:600}
 .qrow{display:flex;gap:8px;align-items:center;margin-top:8px}
 .qrow select,.qrow input{font-family:ui-monospace,Menlo,monospace;font-size:13px;padding:9px;border-radius:9px;border:1px solid var(--line);background:var(--inputbg);color:var(--mist)}
 .qrow select{flex:1}
@@ -110,7 +111,7 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
  </div>
  <div class="card">
   <div class="row"><label>Speed / Direction</label><span class="val" id="spv">stop</span></div>
-  <input type="range" id="sp" min="-100" max="100" value="0" oninput="spShow(this.value)" onpointerdown="spDrag=true" onpointerup="spDrag=false" onchange="spDrag=false;lastSpSent=Date.now();const o={cmd:'speed',v:+this.value};cmd(o);if(fmir.checked)fleetSend(o)">
+  <input type="range" id="sp" min="-100" max="100" value="0" oninput="spShow(this.value)" onpointerdown="spDrag=true" onpointerup="spDrag=false" onchange="spDrag=false;spSend(+this.value)">
   <div class="ends"><span>&#9664; reverse</span><span class="stopbtn" onclick="spStop()">stop</span><span>forward &#9654;</span></div>
  </div>
  <div class="card">
@@ -132,7 +133,7 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
   <div class="row"><label>Auto-play a sequence of modes</label><input id="qen" type="checkbox" class="sw"></div>
   <div id="qlist"></div>
   <button class="addq" onclick="addStep()">+ Add step</button>
-  <button class="save" onclick="saveMotion()">Apply queue</button>
+  <button class="save ghost" onclick="saveMotion()">Apply queue</button>
   <div class="sub" id="qnote" style="margin-top:8px">When on, the sculpture steps through this list and loops. It overrides manual mode selection.</div>
  </div>
 </div>
@@ -213,6 +214,39 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
   </div>
   <button class="save" style="margin-top:10px;white-space:nowrap;font-size:12px" onclick="fleetSyncNow()">Send mode + speed to all</button>
   <div class="sub" id="fnote" style="margin-top:8px"></div>
+ </div>
+ <div class="card">
+  <span class="eyebrow">Swarm</span>
+  <div class="sub" style="margin:8px 0 10px">Choreograph every sculpture as one wall. Drag each dot to its real place, pick a pattern, engage: devices sync clocks over the network and run the motion locally, phase-locked. The preview animates the exact math the wall will run.</div>
+  <canvas id="swcv" style="width:100%;height:150px;border:1px solid var(--line);border-radius:12px;touch-action:none"></canvas>
+  <div class="sub" style="margin:6px 0 8px">Tap a dot to preview a gesture ripple. With Ripple selected, tap empty space to set the source.</div>
+  <div class="grid2" style="margin-top:0">
+   <button class="nbtn" onclick="swRow()">Arrange in a row</button>
+   <button class="nbtn" onclick="swLinkKey()">Link devices</button>
+  </div>
+  <div class="grid4" style="margin-top:10px">
+   <div class="chip" id="sw_p0" onclick="swPat(0)">Unison</div>
+   <div class="chip" id="sw_p1" onclick="swPat(1)">Wave</div>
+   <div class="chip" id="sw_p2" onclick="swPat(2)">Ripple</div>
+   <div class="chip" id="sw_p3" onclick="swPat(3)">Cascade</div>
+   <div class="chip" id="sw_p4" onclick="swPat(4)">Flock</div>
+  </div>
+  <div class="row" style="margin-top:14px"><label>Amplitude</label><span class="val" id="swav">50%</span></div>
+  <input type="range" id="swamp" min="0" max="100" value="50" oninput="swParam()">
+  <div class="row" id="swr0" style="margin-top:8px"><label id="swl0"></label><span class="val" id="swv0"></span></div>
+  <input type="range" id="sws0" oninput="swParam()">
+  <div class="row" id="swr1" style="margin-top:8px"><label id="swl1"></label><span class="val" id="swv1"></span></div>
+  <input type="range" id="sws1" oninput="swParam()">
+  <div class="row" id="swr2" style="margin-top:8px"><label id="swl2"></label><span class="val" id="swv2"></span></div>
+  <input type="range" id="sws2" oninput="swParam()">
+  <div class="row" style="margin-top:10px"><label>Speed slider drives the swarm</label><input id="swsl" type="checkbox" class="sw" checked onchange="localStorage.ks_swsl=this.checked?'1':'0'"></div>
+  <div class="sub" style="margin:4px 0 6px">While engaged, the Control tab's speed slider sets the whole wall's amplitude in one move; no send button needed.</div>
+  <div class="row" style="margin-top:6px"><label>This sculpture is the conductor</label><button class="nbtn" id="swcondl" onclick="swMakeCond(-1)">Set</button></div>
+  <div class="grid2" style="margin-top:12px">
+   <button class="save" style="margin-top:0" onclick="swEngage(true)">Engage swarm</button>
+   <button class="save ghost" style="margin-top:0" onclick="swEngage(false)">Release</button>
+  </div>
+  <div class="sub" id="swnote" style="margin-top:8px">Mark one sculpture as conductor (C in the list above, or this one), link devices once, then engage.</div>
  </div>
 </div>
 
@@ -321,7 +355,7 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
 </div>
 
 <script>
-const MODES=['MANUAL','BREATHE','SWEEP','WANDER','TIDE','PENDULUM','HEARTBEAT','STUTTER'],HUE=[210,165,280,35,195,320,355,55];
+const MODES=['MANUAL','BREATHE','SWEEP','WANDER','TIDE','PENDULUM','HEARTBEAT','STUTTER','SWARM'],HUE=[210,165,280,35,195,320,355,55,130];
 // Q is the offline command queue. MQ is the mode queue playlist. They were one
 // variable, so opening the Motion tab clobbered any commands queued while offline.
 let w,en=false,staMode=false,Q=[],MQ=[],qi=-1,St={speed:0,mode:0,en:false};
@@ -333,10 +367,17 @@ function ledSend(){lastLedSent=Date.now();const o={cmd:'led',m:LM,hue:+lhue.valu
 function loadLed(){api('/led').then(r=>r.json()).then(j=>{LM=j.m;lhue.value=j.hue;lbri.value=j.bri;lrt.value=j.rt;
  lhv.textContent=j.hue+'\u00b0';lbv.textContent=j.bri+'%';lrv.textContent=j.rt;
  for(let i=0;i<5;i++)document.getElementById('l'+i).className='chip'+(i==j.m?' on':'');ledLoaded=true;});}
-function spStop(){sp.value=0;spShow(0);lastSpSent=Date.now();const o={cmd:'speed',v:0};cmd(o);if(fmir.checked)fleetSend(o);}
+function spStop(){sp.value=0;spShow(0);spSend(0);}
+// The one speed control: normally sends a speed command (and mirrors to the
+// fleet). While the swarm is engaged and the toggle is on, it drives the swarm
+// amplitude instead: one message to the conductor, the beacon moves the wall.
+function spSend(v){lastSpSent=Date.now();
+ if(swSliderDrive()){SW.amp=Math.abs(v)/100;swUi();swSave();swSendCmd(true);return;}
+ const o={cmd:'speed',v:v};cmd(o);if(fmir.checked)fleetSend(o);}
 function spShow(v){v=+v;spv.textContent=v?((v>0?'+':'')+v+'% '+(v>0?'fwd':'rev')):'stop';}
 function tab(t){let p={c:pc,m:pm,l:pl,f:pf,n:pn,h:ph},b={c:tc,m:tm,l:tl,f:tf,n:tn,h:th};for(let k in p){p[k].style.display=k==t?'block':'none';b[k].className='tab'+(k==t?' on':'');}if(t=='n')loadNet();if(t=='m')loadMotion();if(t=='l'&&!ledLoaded)loadLed();if(t=='f'){renderFleet();for(let h of FP)fleetConnect(h);}}
 function boot(){flushQ();if(booted)return;booted=true;loadMotion();
+ api('/fleet').then(r=>r.json()).then(j=>fleetMerge(j.l)).catch(e=>{});
  if(!localStorage.ks_seen){wel.style.display='flex';}}
 // Flush queued commands only once the session is authorized; flushing in
 // onopen fired before the auth handshake, so every queued command bounced
@@ -357,6 +398,8 @@ function connect(){
  w.onerror=()=>{try{w.close();}catch(e){}};  // mobile sockets half-die; force a clean reconnect
  w.onmessage=e=>{const t=JSON.parse(e.data);
   if(t.type=='hello'){
+   if(t.fw)fwver.textContent=t.fw;
+   if(t.host)SELFH=t.host;
    if(t.auth){if(PW){w.send(JSON.stringify({cmd:'auth',pw:PW}));}else{lock.style.display='flex';}}
    else{TK=t.tok||'';lock.style.display='none';boot();}
    return;}
@@ -370,7 +413,10 @@ function connect(){
   if(t.type=='netsaved'){note.textContent='Saved. Rebooting. Reconnect to your network, then open '+host.value+'.local';return;}
   if(t.type=='motionsaved'){flash(mnote,'Saved and applied','');flash(qnote,'Saved and applied',QHELP);if(Date.now()-lastMotionSave>1200)setTimeout(loadMotion,300);return;}
   if(t.type=='queueoff'){qen.checked=false;qi=-1;markQueueRow();flash(qnote,'Queue stopped: a mode was chosen directly',QHELP);return;}
-  if(t.type=='fwstatus'){fwnote.textContent=t.s=='downloading'?'Downloading and installing, do not power off...':('Update failed: '+(t.m||'')); return;}
+  if(t.type=='fwstatus'){fwnote.textContent=
+   t.s=='downloading'?'Downloading and installing, do not power off...':
+   t.s=='ok'?'Installed. Rebooting, back in a few seconds...':
+   'Update failed: '+(t.m||'unknown error');return;}
   if(t.type!='tele')return;
   St.speed=t.speed;St.mode=t.mode;St.en=t.enabled;
   document.documentElement.style.setProperty('--h',HUE[t.mode]||210);
@@ -379,10 +425,14 @@ function connect(){
   mstate.textContent=t.enabled?(t.speed==0?'holding':'running'):'standby';
   if(t.gesture=='idle'){gs.style.display='none';}else{gs.style.display='';gs.textContent=t.gesture.replace(/_/g,' ');gs.className='pill ok';}
   en=t.enabled;let eb=document.getElementById('en');eb.className='power'+(en?' on':'');eb.textContent=en?'Motor enabled':'Motor enable';
-  for(let i=0;i<MODES.length;i++)document.getElementById('m'+i).className='chip'+(t.mode==i?' on':'');
+  for(let i=0;i<8;i++)document.getElementById('m'+i).className='chip'+(t.mode==i?' on':'');
+  if(t.sw){SWL=t.sw;swcondl.className='nbtn'+(SWL.cond?' on':'');swcondl.textContent=SWL.cond?'Yes':'Set';}
   if(t.qi!==qi){qi=t.qi;markQueueRow();}
   if(t.leds&&!ledSeen){ledSeen=true;tl.style.display='';loadLed();}
-  if(t.sl!==undefined&&!spDrag&&Date.now()-lastSpSent>1200&&document.activeElement!==sp&&+sp.value!==t.sl){sp.value=t.sl;spShow(t.sl);}
+  if(swSliderDrive()){ // slider mirrors the wall amplitude, not the local ceiling
+   if(SWL&&!spDrag&&Date.now()-lastSpSent>1200&&document.activeElement!==sp){
+    let a=Math.round(SWL.amp*100);if(Math.abs(+sp.value)!==a){sp.value=a;spShow(a);}}}
+  else if(t.sl!==undefined&&!spDrag&&Date.now()-lastSpSent>1200&&document.activeElement!==sp&&+sp.value!==t.sl){sp.value=t.sl;spShow(t.sl);}
   let f=t.fault||{};let bad=f.tmc||f.otp||f.tof;
   flt.textContent=f.tmc?'TMC comm':f.otp?('OVERTEMP '+t.derate+'%'):f.tof?'ToF fault':'health ok';
   flt.className=bad?'pill bad':'pill ok';
@@ -401,10 +451,22 @@ function tgl(){const o={cmd:'enable',v:!en};cmd(o);if(fmir.checked)fleetSend(o);
 // ---------- Fleet: command several sculptures from this page ----------
 // Peers live in localStorage on this phone; sockets are plain extra WebSockets
 // to each peer's :81. Peers protected with the same password unlock with it.
-let FP=JSON.parse(localStorage.ks_fleet||'[]'),FS={},FST={};
+let FP=JSON.parse(localStorage.ks_fleet||'[]'),FS={},FST={},SELFH='';
 function fleetSave(){localStorage.ks_fleet=JSON.stringify(FP);}
-function fleetAdd(){let h=fhost.value.trim();if(!h||FP.includes(h))return;FP.push(h);fhost.value='';fleetSave();renderFleet();fleetConnect(h);}
-function fleetDel(i){let h=FP[i];FP.splice(i,1);fleetSave();try{FS[h]&&FS[h].close();}catch(e){}delete FS[h];delete FST[h];renderFleet();}
+// The roster also lives on every device (NVS): the page pulls it at boot via
+// /fleet and pushes changes to all reachable devices, so opening ANY
+// sculpture's page shows the whole fleet, not just this browser's memory.
+function isSelfHost(h){h=h.toLowerCase().replace(/\.local$/,'');
+ let me=location.hostname.toLowerCase().replace(/\.local$/,'');
+ return h==me||(SELFH&&h==SELFH.toLowerCase());}
+function fleetMerge(l){let added=false;
+ for(let h of(l||[])){if(!h||isSelfHost(h)||FP.includes(h))continue;FP.push(h);added=true;}
+ if(added){fleetSave();renderFleet();for(let h of FP)fleetConnect(h);}}
+function fleetPushRoster(){let r=FP.slice();if(SELFH)r.push(SELFH+'.local');
+ let o={cmd:'fleet',l:r};cmd(o);
+ for(let h of FP){let sk=FS[h];if(sk&&sk.readyState==1&&FST[h]==2)sk.send(JSON.stringify(o));}}
+function fleetAdd(){let h=fhost.value.trim();if(!h||FP.includes(h))return;FP.push(h);fhost.value='';fleetSave();renderFleet();fleetConnect(h);fleetPushRoster();}
+function fleetDel(i){let h=FP[i];FP.splice(i,1);fleetSave();try{FS[h]&&FS[h].close();}catch(e){}delete FS[h];delete FST[h];delete FSW[h];renderFleet();fleetPushRoster();}
 function fleetConnect(h){
  if(FS[h]&&FS[h].readyState<2)return;
  FST[h]=0;renderFleet();
@@ -416,20 +478,124 @@ function fleetConnect(h){
  sk.onmessage=e=>{let t;try{t=JSON.parse(e.data);}catch(x){return;}
   if(t.type=='hello'){if(t.auth){sk.send(JSON.stringify({cmd:'auth',pw:PW}));}else{FST[h]=2;renderFleet();}return;}
   if(t.type=='authok'){FST[h]=2;renderFleet();return;}
-  if(t.type=='authfail'){FST[h]=3;renderFleet();return;}};
+  if(t.type=='authfail'){FST[h]=3;renderFleet();return;}
+  if(t.type=='tele'&&t.sw){let had=FSW[h];FSW[h]=t.sw;
+   if(!had||had.cond!=t.sw.cond||had.on!=t.sw.on||had.sync!=t.sw.sync)renderFleet();return;}};
 }
 function renderFleet(){let html='';FP.forEach((h,i)=>{
  let st=FST[h]||0,col=st==2?'#4c8':st==1?'#cc4':st==3?'#f66':'#666',
      lbl=st==2?'ready':st==1?'connecting':st==3?'locked (wrong password)':'offline';
+ let sw=FSW[h],tag=sw?((sw.cond?' &middot; conductor':'')+(sw.on?(sw.sync?' &middot; in swarm':' &middot; no clock'):'')):'';
  html+='<div class="row" style="padding:7px 0;border-bottom:1px solid var(--line)">'
   +'<span style="width:9px;height:9px;border-radius:50%;background:'+col+';box-shadow:0 0 8px '+col+';flex:0 0 auto;margin-right:10px"></span>'
-  +'<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+h+' <span class="sub">'+lbl+'</span></span>'
+  +'<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+h+' <span class="sub">'+lbl+tag+'</span></span>'
+  +'<div class="hbtn" style="margin-right:6px'+(sw&&sw.cond?';color:#fff;border-color:hsl(var(--h),85%,62%)':'')+'" title="Make this the swarm conductor" onclick="swMakeCond('+i+')">C</div>'
   +'<div class="qx" onclick="fleetDel('+i+')">&times;</div></div>';});
  flist.innerHTML=html||'<div class="sub">No sculptures added yet.</div>';}
 function fleetSend(o){let n=0;for(let h of FP){let sk=FS[h];if(sk&&sk.readyState==1&&FST[h]==2){sk.send(JSON.stringify(o));n++;}}
  if(fnote)flash(fnote,n?('Sent to '+n+' sculpture'+(n>1?'s':'')):'No connected sculptures','');return n;}
 function fleetSyncNow(){fleetSend({cmd:'mode',v:St.mode});fleetSend({cmd:'speed',v:+sp.value});}
 setInterval(()=>{for(let h of FP){if(!FS[h]||FS[h].readyState>=2)fleetConnect(h);}},8000);
+
+// ---------- Swarm: choreograph the fleet as one wall ----------
+// The pattern math mirrors swarmPattern() in the firmware EXACTLY, so this
+// canvas preview IS the motion the wall will run. Params live on this page,
+// are pushed to the conductor over its websocket, and fan out to the
+// followers via the conductor's UDP clock beacon.
+let FSW={},SWL=null,SWPOS={},SWDRAG=null,SWTAP=null,SIMP=[],lastSwSent=0,swPosSent={};
+const SWDEF=[
+ {n:'Unison', p:[12,1,0,0],    ui:[[0,'Period s',2,60,1]]},
+ {n:'Wave',   p:[12,0.8,0,0],  ui:[[0,'Period s',2,60,1],[1,'Wavelength',0.2,3,0.05],[2,'Direction rad',0,6.28,0.05]]},
+ {n:'Ripple', p:[10,0.5,0.5,0.5],ui:[[0,'Period s',2,60,1],[1,'Ring spacing',0.1,2,0.05]]},
+ {n:'Cascade',p:[16,0.15,0,0], ui:[[0,'Cycle s',2,60,1],[1,'Pulse width',0.05,0.5,0.01]]},
+ {n:'Flock',  p:[30,1,0,0],    ui:[[0,'Drift s',5,120,1],[1,'Spatial scale',0.2,3,0.05]]}];
+let SW=JSON.parse(localStorage.ks_swarm||'null')||{pat:1,amp:0.5,p:SWDEF[1].p.slice()};
+function swSave(){localStorage.ks_swarm=JSON.stringify(SW);}
+const sn=ph=>{ph-=Math.floor(ph);return Math.sin(ph*6.283185307179586);};
+function swarmPattern(id,x,y,t,p){ // KEEP IN SYNC WITH kinetic_sculpture.ino
+ let p0=Math.max(p[0],0.5),p1=Math.max(p[1],0.05);
+ if(id==0)return sn(t/p0);
+ if(id==1)return sn(t/p0-(x*Math.cos(p[2])+y*Math.sin(p[2]))/p1);
+ if(id==2)return sn(t/p0-Math.hypot(x-p[2],y-p[3])/p1);
+ if(id==3){let ph=t/p0;ph-=Math.floor(ph);let d=ph-x;d-=Math.floor(d);if(d>0.5)d-=1;
+  if(Math.abs(d)>p1)return 0;return 0.5*(1+Math.cos(Math.PI*d/p1));}
+ if(id==4){let s=p1;return 0.50*sn(t/p0+s*(0.81*x+0.27*y))
+  +0.35*sn(t/(p0*0.618)+s*(0.37*x+1.26*y))
+  +0.15*sn(t/(p0*0.382)+s*(1.50*x+0.49*y));}
+ return 0;}
+function swOverlaySim(x,y,t){SIMP=SIMP.filter(g=>t-g.t<8);let sum=0;
+ for(const g of SIMP){let age=t-g.t,d=Math.hypot(x-g.x,y-g.y);
+  sum+=Math.exp(-age/8)*Math.sin(6.2832*(age/4-d/0.4));}return sum;}
+function swDevs(){let a=[{k:'_',h:'this one'}];for(const h of FP)a.push({k:h,h:h});return a;}
+function swInfo(k){return k=='_'?SWL:FSW[k];}
+function swGet(k){let s=swInfo(k),recent=SWDRAG==k||Date.now()-(swPosSent[k]||0)<3000;
+ if(s&&!recent)SWPOS[k]={x:s.x,y:s.y};
+ return SWPOS[k]||(SWPOS[k]={x:0.5,y:0.5});}
+function swSendTo(k,o){if(k=='_'){cmd(o);return;}let sk=FS[k];if(sk&&sk.readyState==1)sk.send(JSON.stringify(o));}
+function swSendPos(k,p){swPosSent[k]=Date.now();swSendTo(k,{cmd:'swarmpos',x:+p.x.toFixed(3),y:+p.y.toFixed(3)});}
+function swSize(){let r=swcv.getBoundingClientRect();
+ if(r.width&&swcv.width!=Math.round(r.width*dpr)){swcv.width=Math.round(r.width*dpr);swcv.height=Math.round(r.height*dpr);}}
+function swDraw(){swSize();let g=swcv.getContext('2d'),W=swcv.width,H=swcv.height;
+ g.clearRect(0,0,W,H);
+ let t=performance.now()/1000,hue=+getComputedStyle(document.documentElement).getPropertyValue('--h')||210;
+ for(const d of swDevs()){let p=swGet(d.k),x=p.x*W,y=p.y*H;
+  let v=swarmPattern(SW.pat,p.x,p.y,t,SW.p)+swOverlaySim(p.x,p.y,t);
+  v=Math.max(-1,Math.min(1,v));
+  let r=(6+10*Math.abs(v)*SW.amp)*dpr,s=swInfo(d.k);
+  g.beginPath();g.arc(x,y,r,0,6.2832);
+  g.fillStyle='hsla('+(v>=0?hue:(hue+150)%360)+',85%,60%,'+(0.25+0.55*Math.abs(v))+')';g.fill();
+  if(s&&s.cond){g.beginPath();g.arc(x,y,r+4*dpr,0,6.2832);
+   g.strokeStyle='hsl('+hue+',85%,70%)';g.lineWidth=1.5*dpr;g.stroke();}
+  g.fillStyle='rgba(160,170,195,.9)';g.font=(9*dpr)+'px monospace';g.textAlign='center';
+  g.fillText(d.h.split('.')[0].slice(-10)+(s&&s.on&&!s.sync&&!s.cond?' ?':''),x,y+r+11*dpr);}
+ if(SW.pat==2){let x=SW.p[2]*W,y=SW.p[3]*H;g.strokeStyle='rgba(255,255,255,.5)';g.lineWidth=dpr;
+  g.beginPath();g.moveTo(x-5*dpr,y);g.lineTo(x+5*dpr,y);g.moveTo(x,y-5*dpr);g.lineTo(x,y+5*dpr);g.stroke();}}
+function swLoop(){if(pf.style.display!='none')swDraw();requestAnimationFrame(swLoop);}
+function swPt(e){let r=swcv.getBoundingClientRect();
+ return{x:Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),y:Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))};}
+swcv.onpointerdown=e=>{swcv.setPointerCapture(e.pointerId);let q=swPt(e),best=null,bd=0.09;
+ for(const d of swDevs()){let p=swGet(d.k),dd=Math.hypot(p.x-q.x,p.y-q.y);if(dd<bd){bd=dd;best=d.k;}}
+ SWTAP=q;if(best)SWDRAG=best;
+ else if(SW.pat==2){SW.p[2]=q.x;SW.p[3]=q.y;swUi();swSave();swPush();}};
+swcv.onpointermove=e=>{if(SWDRAG)SWPOS[SWDRAG]=swPt(e);};
+swcv.onpointerup=e=>{if(!SWDRAG)return;let q=swPt(e),k=SWDRAG;SWDRAG=null;
+ if(SWTAP&&Math.hypot(q.x-SWTAP.x,q.y-SWTAP.y)<0.02){SIMP.push({t:performance.now()/1000,x:q.x,y:q.y});return;}
+ SWPOS[k]=q;swSendPos(k,q);};
+function swRow(){let ds=swDevs(),n=ds.length;ds.forEach((d,i)=>{
+ let p={x:n>1?i/(n-1):0.5,y:0.5};SWPOS[d.k]=p;swSendPos(d.k,p);});}
+function swPat(i){SW.pat=i;SW.p=SWDEF[i].p.slice();swUi();swSave();swPush();}
+function swUi(){for(let i=0;i<5;i++)document.getElementById('sw_p'+i).className='chip'+(SW.pat==i?' on':'');
+ swamp.value=Math.round(SW.amp*100);swav.textContent=Math.round(SW.amp*100)+'%';
+ let ui=SWDEF[SW.pat].ui;
+ for(let i=0;i<3;i++){let r=document.getElementById('swr'+i),s=document.getElementById('sws'+i);
+  if(i<ui.length){let u=ui[i];r.style.display='';s.style.display='';
+   document.getElementById('swl'+i).textContent=u[1];s.min=u[2];s.max=u[3];s.step=u[4];s.value=SW.p[u[0]];
+   document.getElementById('swv'+i).textContent=(+SW.p[u[0]]).toFixed(u[4]<1?2:0);}
+  else{r.style.display='none';s.style.display='none';}}}
+function swParam(){SW.amp=+swamp.value/100;let ui=SWDEF[SW.pat].ui;
+ for(let i=0;i<ui.length;i++)SW.p[ui[i][0]]=+document.getElementById('sws'+i).value;
+ swUi();swSave();swPush();}
+function swCondTarget(){if(SWL&&SWL.cond)return '_';
+ for(const h of FP)if(FSW[h]&&FSW[h].cond&&FST[h]==2)return h;return null;}
+// True while the main speed slider should steer swarm amplitude: toggle on,
+// swarm engaged somewhere, and a conductor reachable to receive the change.
+function swSliderDrive(){return swsl.checked&&((SWL&&SWL.on)||Object.values(FSW).some(s=>s&&s.on))&&swCondTarget()!==null;}
+function swSendCmd(on){let k=swCondTarget();
+ if(k===null){flash(swnote,'No conductor: tap C next to a sculpture (or set this one) first','');return false;}
+ swSendTo(k,{cmd:'swarm',on:on,pat:SW.pat,amp:SW.amp,p0:SW.p[0],p1:SW.p[1],p2:SW.p[2],p3:SW.p[3]});
+ return true;}
+// Live param changes re-push to the conductor while any device is swarming.
+function swPush(){let eng=(SWL&&SWL.on)||Object.values(FSW).some(s=>s&&s.on);
+ if(!eng||Date.now()-lastSwSent<250)return;lastSwSent=Date.now();swSendCmd(true);}
+function swEngage(on){if(swSendCmd(on))
+ flash(swnote,on?'Engaged: the wall is phase-locked to the conductor':'Released: devices ramp to rest','');}
+function swMakeCond(i){let tgt=i<0?'_':FP[i];
+ for(const d of swDevs())swSendTo(d.k,{cmd:'swarmrole',conductor:d.k==tgt});
+ flash(swnote,'Conductor set','');}
+function swLinkKey(){let k=+(localStorage.ks_swkey||0);
+ if(!k){k=Math.floor(Math.random()*4294967294)+1;localStorage.ks_swkey=k;}
+ for(const d of swDevs())swSendTo(d.k,{cmd:'swarmkey',v:k});
+ flash(swnote,'Devices linked with a shared swarm key','');}
 
 function setSta(v){staMode=v;document.getElementById('nmSta').className='nbtn'+(v?' on':'');document.getElementById('nmAp').className='nbtn'+(v?'':' on');staF.style.display=v?'block':'none';apF.style.display=v?'none':'block';}
 function updS(){stF.style.display=us.checked?'block':'none';}
@@ -448,7 +614,7 @@ function saveNet(){
 function markQueueRow(){MQ.forEach((s,i)=>{let r=document.getElementById('qr'+i);
  if(r)r.style.borderColor=(i===qi&&qen.checked)?'hsl(var(--h),85%,62%)':'';});}
 function renderQueue(){let h='';MQ.forEach((s,i)=>{
- let opts=MODES.map((m,k)=>'<option value="'+k+'"'+(k==s.m?' selected':'')+'>'+m+'</option>').join('');
+ let opts=MODES.slice(0,8).map((m,k)=>'<option value="'+k+'"'+(k==s.m?' selected':'')+'>'+m+'</option>').join('');
  h+='<div class="qrow" id="qr'+i+'" style="border:1px solid transparent;border-radius:10px;padding:2px;transition:.25s"><select onchange="MQ['+i+'].m=+this.value"> '+opts+'</select>'
   +'<input type="number" min="1" max="3600" value="'+s.s+'" onchange="MQ['+i+'].s=+this.value"><div class="qx" onclick="delStep('+i+')">&times;</div></div>';});
  qlist.innerHTML=h;markQueueRow();}
@@ -520,7 +686,9 @@ resize();draw();if(!reduce)loop();
 qen.onchange=markQueueRow;
 setTheme(localStorage.ks_theme=='light'?'light':'dark');
 fmir.checked=!!localStorage.ks_fmir;
+swsl.checked=localStorage.ks_swsl!=='0';   // default on
 renderFleet();
+swUi();swLoop();   // swarm designer: sliders + canvas preview (draws only while Fleet tab is open)
 connect();   // boot() runs after the hello/auth handshake
 </script></body></html>
 )rawliteral";
