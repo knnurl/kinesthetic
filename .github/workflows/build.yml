@@ -75,13 +75,15 @@ jobs:
           # The embedded JavaScript must parse: a syntax error here ships a dead UI.
           sed -n '/<script>/,/<\/script>/p' page.h | sed '1d;$d' > /tmp/app.js
           node --check /tmp/app.js || { echo "ERROR: page.h JavaScript has a syntax error."; exit 1; }
-          # Firmware mode count and UI mode chips must agree (the static_assert
-          # guards the firmware side; this guards the page side).
+          # The mode grid has one chip per user-selectable mode. SWARM is the
+          # final MODES[] entry and is engaged from the Fleet tab rather than the
+          # grid, so the firmware mode count is exactly the chip count plus one.
+          # (The firmware static_assert guards MODE_COUNT; this guards the page.)
           fwn=$(grep -oE 'MODE_COUNT == [0-9]+' kinetic_sculpture.ino | grep -oE '[0-9]+')
           uin=$(grep -oE 'id="m[0-9]+"' page.h | sort -u | wc -l)
-          echo "== mode count: firmware=$fwn ui_chips=$uin =="
-          if [ "$fwn" != "$uin" ]; then
-            echo "ERROR: firmware declares $fwn modes but page.h has $uin mode chips."
+          echo "== mode count: firmware=$fwn ui_chips=$uin (expect firmware = chips + 1 for SWARM) =="
+          if [ "$fwn" != "$((uin + 1))" ]; then
+            echo "ERROR: firmware declares $fwn modes but page.h has $uin mode chips (expected $((uin + 1)) = chips + SWARM)."
             exit 1
           fi
           mkdir -p sketch/kinetic_sculpture
