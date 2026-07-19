@@ -1453,6 +1453,9 @@ DNSServer        dns;
 #define DEF_HOST    "sculpture"
 #define OTA_PASS    "kinetic"    // required by the IDE when uploading over WiFi
 #define FW_VERSION  "2.2.0"      // shown in the UI; bump on each release
+// Pre-filled into the OTA box so a fresh board can self-update with one tap. The
+// CI workflow publishes firmware.bin to this rolling "latest" release on push.
+#define DEF_FW_URL  "https://github.com/knnurl/kinesthetic/releases/download/latest/firmware.bin"
 
 // Loaded network settings + live status.
 String    apSsid, apPass, staSsid, staPass, hostName;
@@ -1866,7 +1869,7 @@ void loadNetSettings() {
   staIP.fromString(prefs.getString("sta_ip", "0.0.0.0"));
   staGw.fromString(prefs.getString("sta_gw", "0.0.0.0"));
   staMask.fromString(prefs.getString("sta_mask", "255.255.255.0"));
-  fwUrl = prefs.getString("fw_url", "");
+  fwUrl = prefs.getString("fw_url", DEF_FW_URL);
   fleetList = prefs.getString("fl_list", "");
 }
 
