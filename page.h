@@ -70,6 +70,7 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
 .save.ghost{background:transparent;color:hsl(var(--h),85%,62%);border:1px solid hsl(var(--h),85%,62%);font-weight:600}
 .qrow{display:flex;gap:8px;align-items:center;margin-top:8px}
 .qrow select,.qrow input{font-family:ui-monospace,Menlo,monospace;font-size:13px;padding:9px;border-radius:9px;border:1px solid var(--line);background:var(--inputbg);color:var(--mist)}
+.qrow select option{background:var(--ink);color:var(--mist)}
 .qrow select{flex:1}
 .qrow input{width:74px;text-align:right}
 .qx{border:1px solid var(--line);background:rgba(255,80,80,.08);color:#ff8a8a;border-radius:9px;padding:9px 12px;font-family:ui-monospace,monospace}
@@ -205,6 +206,8 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
   <div id="flist"></div>
   <button class="nbtn" style="width:100%;margin-top:10px" onclick="fleetScan(true)">Scan network for sculptures</button>
   <div class="row" style="margin-top:8px"><input class="ti" id="fhost" placeholder="or add manually: sculpture-XXXX.local" style="flex:1;min-width:0" onkeydown="if(event.key=='Enter')fleetAdd()"><button class="nbtn" style="margin-left:8px" onclick="fleetAdd()">Add</button></div>
+  <div class="row" style="margin-top:12px"><label>This sculpture is the conductor</label><button class="nbtn" id="swcondl" onclick="swMakeCond(-1)">Set</button></div>
+  <div class="sub" style="margin-top:4px">The conductor drives the swarm. Tap C by any sculpture above to move the role.</div>
  </div>
  <div class="card">
   <div class="row"><label>Mirror my controls to the fleet</label><input id="fmir" type="checkbox" class="sw" onchange="localStorage.ks_fmir=this.checked?'1':''"></div>
@@ -243,25 +246,26 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
   <input type="range" id="sws2" oninput="swParam()">
   <div class="row" style="margin-top:10px"><label>Speed slider drives the swarm</label><input id="swsl" type="checkbox" class="sw" checked onchange="localStorage.ks_swsl=this.checked?'1':'0'"></div>
   <div class="sub" style="margin:4px 0 6px">While engaged, the Control tab's speed slider sets the whole wall's amplitude in one move; no send button needed.</div>
-  <div class="row" style="margin-top:6px"><label>Respond to the room sensor</label><input id="swsen" type="checkbox" class="sw" checked onchange="swSense(this.checked)"></div>
+  <div class="row" style="margin-top:6px"><label>Respond to the room sensor</label><input id="swsen" type="checkbox" class="sw" checked onchange="swSense(this.checked);scFold()"></div>
   <div class="sub" id="swsennote" style="margin:4px 0 6px">A VL53L5CX hand sensor can drive the wall. Pick a mode below. No sensor detected yet.</div>
-  <div class="grid4" id="scpresets" style="margin-top:4px">
-   <div class="chip" id="sc_m0" onclick="scPreset(0)">Off</div>
-   <div class="chip" id="sc_m1" onclick="scPreset(1)">Wake</div>
-   <div class="chip" id="sc_m2" onclick="scPreset(2)">Theremin</div>
-   <div class="chip" id="sc_m3" onclick="scPreset(3)">Ripple pen</div>
-   <div class="chip" id="sc_m4" onclick="scPreset(4)">Spotlight</div>
-   <div class="chip" id="sc_m5" onclick="scPreset(5)">Mirror</div>
+  <div id="scbody">
+   <div class="grid4" id="scpresets" style="margin-top:4px">
+    <div class="chip" id="sc_m0" onclick="scPreset(0)">Off</div>
+    <div class="chip" id="sc_m1" onclick="scPreset(1)">Wake</div>
+    <div class="chip" id="sc_m2" onclick="scPreset(2)">Theremin</div>
+    <div class="chip" id="sc_m3" onclick="scPreset(3)">Ripple pen</div>
+    <div class="chip" id="sc_m4" onclick="scPreset(4)">Spotlight</div>
+    <div class="chip" id="sc_m5" onclick="scPreset(5)">Mirror</div>
+   </div>
+   <div class="row" style="margin-top:10px"><label>Advanced: route each axis</label><input id="scadv" type="checkbox" class="sw" onchange="scAdvv.style.display=this.checked?'block':'none'"></div>
+   <div id="scAdvv" style="display:none">
+    <div class="sub" style="margin:4px 0 6px">Map each hand signal to a wall effect. Editing marks the mode Custom.</div>
+    <div id="scrows"></div>
+    <div class="fr"><label>Spotlight radius</label><input id="scspotr" class="ti" type="number" min="0.05" max="1" step="0.05" value="0.3" oninput="scEdit()"></div>
+   </div>
+   <div class="row" style="margin-top:10px"><label>Preview hand depth</label><span class="val" id="scdv">off</span></div>
+   <input type="range" id="scd" min="0" max="100" value="0" oninput="scdv.textContent=this.value>0?this.value+'%':'off'">
   </div>
-  <div class="row" style="margin-top:10px"><label>Advanced: route each axis</label><input id="scadv" type="checkbox" class="sw" onchange="scAdvv.style.display=this.checked?'block':'none'"></div>
-  <div id="scAdvv" style="display:none">
-   <div class="sub" style="margin:4px 0 6px">Map each hand signal to a wall effect. Editing marks the mode Custom.</div>
-   <div id="scrows"></div>
-   <div class="fr"><label>Spotlight radius</label><input id="scspotr" class="ti" type="number" min="0.05" max="1" step="0.05" value="0.3" oninput="scEdit()"></div>
-  </div>
-  <div class="row" style="margin-top:10px"><label>Preview hand depth</label><span class="val" id="scdv">off</span></div>
-  <input type="range" id="scd" min="0" max="100" value="0" oninput="scdv.textContent=this.value>0?this.value+'%':'off'">
-  <div class="row" style="margin-top:6px"><label>This sculpture is the conductor</label><button class="nbtn" id="swcondl" onclick="swMakeCond(-1)">Set</button></div>
   <div class="grid2" style="margin-top:12px">
    <button class="save" style="margin-top:0" onclick="swEngage(true)">Engage swarm</button>
    <button class="save ghost" style="margin-top:0" onclick="swEngage(false)">Release</button>
@@ -450,7 +454,7 @@ function connect(){
   en=t.enabled;let eb=document.getElementById('en');eb.className='power'+(en?' on':'');eb.textContent=en?'Motor enabled':'Motor enable';
   for(let i=0;i<8;i++)document.getElementById('m'+i).className='chip'+(t.mode==i?' on':'');
   if(t.sw){SWL=t.sw;swcondl.className='nbtn'+(SWL.cond?' on':'');swcondl.textContent=SWL.cond?'Yes':'Set';}
-  if(t.sen){SEN=t.sen;if(!senInit){senInit=true;swsen.checked=!!SEN.en;}swSenseStatus();}
+  if(t.sen){SEN=t.sen;if(!senInit){senInit=true;swsen.checked=!!SEN.en;scFold();}swSenseStatus();}
   if(t.qi!==qi){qi=t.qi;markQueueRow();}
   if(t.leds&&!ledSeen){ledSeen=true;tl.style.display='';loadLed();}
   if(swSliderDrive()){ // slider mirrors the wall amplitude, not the local ceiling
@@ -572,12 +576,16 @@ function swSendTo(k,o){if(k=='_'){cmd(o);return;}let sk=FS[k];if(sk&&sk.readySta
 function swSendPos(k,p){swPosSent[k]=Date.now();swSendTo(k,{cmd:'swarmpos',x:+p.x.toFixed(3),y:+p.y.toFixed(3)});}
 function swSize(){let r=swcv.getBoundingClientRect();
  if(r.width&&swcv.width!=Math.round(r.width*dpr)){swcv.width=Math.round(r.width*dpr);swcv.height=Math.round(r.height*dpr);}}
+// Inset normalised 0..1 positions from the canvas edges so edge dots and their
+// labels are not clipped (e.g. a device at x=0 or x=1 after "Arrange in a row").
+const SWPAD=0.1;
+const swMap=(n,D)=>(SWPAD+n*(1-2*SWPAD))*D;
 function swDraw(){swSize();let g=swcv.getContext('2d'),W=swcv.width,H=swcv.height;
  g.clearRect(0,0,W,H);
  let t=performance.now()/1000,hue=+getComputedStyle(document.documentElement).getPropertyValue('--h')||210;
  let hand=scHand(),ctl=scControls(hand);   // simulated sensor hand + routed controls
  let amp=SW.amp*(hand.on?ctl.amp:1);
- for(const d of swDevs()){let p=swGet(d.k),x=p.x*W,y=p.y*H;
+ for(const d of swDevs()){let p=swGet(d.k),x=swMap(p.x,W),y=swMap(p.y,H);
   let pp=SW.p.slice();
   if(hand.on){if(ctl.pov[0])pp[0]=ctl.pval[0];if(ctl.pov[1])pp[1]=ctl.pval[1];if(ctl.pov[2])pp[2]=ctl.pval[2];
    if(SW.pat==2&&ctl.focus){pp[2]=ctl.fx;pp[3]=ctl.fy;}}
@@ -594,11 +602,11 @@ function swDraw(){swSize();let g=swcv.getContext('2d'),W=swcv.width,H=swcv.heigh
   g.fillText(d.h.split('.')[0].slice(-10)+(s&&s.on&&!s.sync&&!s.cond?' ?':''),x,y+r+11*dpr);}
  // Ripple source marker (from routed focus if active, else the pattern param).
  if(SW.pat==2){let fx=(hand.on&&ctl.focus?ctl.fx:SW.p[2]),fy=(hand.on&&ctl.focus?ctl.fy:SW.p[3]);
-  let x=fx*W,y=fy*H;g.strokeStyle='rgba(255,255,255,.5)';g.lineWidth=dpr;
+  let x=swMap(fx,W),y=swMap(fy,H);g.strokeStyle='rgba(255,255,255,.5)';g.lineWidth=dpr;
   g.beginPath();g.moveTo(x-5*dpr,y);g.lineTo(x+5*dpr,y);g.moveTo(x,y-5*dpr);g.lineTo(x,y+5*dpr);g.stroke();}
  // Hand marker whenever a sensor mode is simulating a hand.
  if(hand.on&&SWMOUSE.on){g.strokeStyle='rgba(255,255,255,.35)';g.lineWidth=dpr;
-  g.beginPath();g.arc(SWMOUSE.x*W,SWMOUSE.y*H,(10+16*hand.z)*dpr,0,6.2832);g.stroke();}}
+  g.beginPath();g.arc(swMap(SWMOUSE.x,W),swMap(SWMOUSE.y,H),(10+16*hand.z)*dpr,0,6.2832);g.stroke();}}
 // MIRROR preview: the simulated hand stands in for the sensor's view; nearer
 // devices pulse harder, on one shared breath, like the firmware. Depth scales it.
 function swMirrorSim(x,y,t,hand){if(!hand||!hand.on)return 0.15*sn(t/6);
@@ -606,7 +614,8 @@ function swMirrorSim(x,y,t,hand){if(!hand||!hand.on)return 0.15*sn(t/6);
  return inten*sn(t/1.5);}
 function swLoop(){if(pf.style.display!='none')swDraw();requestAnimationFrame(swLoop);}
 function swPt(e){let r=swcv.getBoundingClientRect();
- return{x:Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),y:Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))};}
+ let inv=(v)=>Math.max(0,Math.min(1,(v-SWPAD)/(1-2*SWPAD)));   // screen -> normalised, undoing the inset
+ return{x:inv((e.clientX-r.left)/r.width),y:inv((e.clientY-r.top)/r.height)};}
 swcv.onpointerdown=e=>{swcv.setPointerCapture(e.pointerId);let q=swPt(e),best=null,bd=0.09;
  for(const d of swDevs()){let p=swGet(d.k),dd=Math.hypot(p.x-q.x,p.y-q.y);if(dd<bd){bd=dd;best=d.k;}}
  SWTAP=q;if(best)SWDRAG=best;
@@ -697,6 +706,8 @@ function swLinkKey(){let k=+(localStorage.ks_swkey||0);
  if(!k){k=Math.floor(Math.random()*4294967294)+1;localStorage.ks_swkey=k;}
  for(const d of swDevs())swSendTo(d.k,{cmd:'swarmkey',v:k});
  flash(swnote,'Devices linked with a shared swarm key','');}
+// Fold the sensor settings away when the sensor response is off.
+function scFold(){scbody.style.display=swsen.checked?'block':'none';}
 // Turn the room sensor response on/off across the whole wall (per-device pref).
 function swSense(on){for(const d of swDevs())swSendTo(d.k,{cmd:'sense',on:on});
  flash(swnote,on?'The wall will respond to the room sensor':'Sensor response off','');}
@@ -808,7 +819,7 @@ setTheme(localStorage.ks_theme=='light'?'light':'dark');
 fmir.checked=!!localStorage.ks_fmir;
 swsl.checked=localStorage.ks_swsl!=='0';   // default on
 renderFleet();
-swUi();scUi();scRenderRows();swLoop();   // swarm + sensor designer; canvas draws only while Fleet tab is open
+swUi();scUi();scRenderRows();scFold();swLoop();   // swarm + sensor designer; canvas draws only while Fleet tab is open
 connect();   // boot() runs after the hello/auth handshake
 </script></body></html>
 )rawliteral";
