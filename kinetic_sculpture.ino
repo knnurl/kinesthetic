@@ -259,11 +259,62 @@ bool     queueOffPending = false;   // set when firmware cancels the queue; the
 #define SWARM_MAGIC         0x4B535731UL  // 'KSW1'
 #define SWARM_TIMEOUT_MS    3000    // no beacon for this long: follower holds at 0
 #define SWARM_BEACON_MS     500     // conductor beacon cadence (2 Hz)
-#define SWARM_PATTERNS      5       // unison, wave, ripple, cascade, flock
+#define SWARM_HELLO_MS      4000    // presence announce cadence (network discovery)
+#define SWARM_PEERS_MAX     24      // discovered devices remembered
+#define SWARM_PEER_TTL_MS   15000   // drop a peer not heard from in this long
+#define SWARM_PATTERNS      6       // unison, wave, ripple, cascade, flock, mirror
+#define SWARM_MIRROR        5       // pattern id that samples the sensor depth field
 #define SWARM_PING_MAX      4       // concurrent gesture ripples remembered
 #define SWARM_PING_PERIOD_S 4.0f    // gesture ripple ring period
 #define SWARM_PING_SPACING  0.4f    // gesture ripple ring spacing (wall units)
 #define SWARM_PING_DECAY_S  8.0f    // gesture ripple lifetime
+
+// ---------- Sensor modulation (VL53L5CX node -> swarm) ----------
+// A dedicated sensor node broadcasts SwarmCue (presence + blob centroid +
+// motion) and, for the MIRROR pattern, SwarmField (an 8x8 depth image). These
+// MODULATE the swarm; they never write swarmAmp (the beacon owns that), so the
+// two cannot fight. All of it is optional: on sensor silence the wall eases back
+// to its designed choreography. Shared state so modeSwarm reads it; only the
+// receive path is WiFi specific. See SENSOR_PLAN.md.
+#define SENSE_TIMEOUT_MS 2000       // no cue/field for this long: relax to ambient
+#define SENSE_IDLE_GAIN  0.35f      // wall energy when the sensor sees nobody
+#define SENSE_FIELD_W    8
+#define SENSE_FIELD_H    8
+
+bool     senseEnabled  = true;              // "respond to sensor" toggle, NVS sw_sense
+float    senseGain     = 1.0f;              // eased presence multiplier, applied in modeSwarm
+float    senseTarget   = 1.0f;              // raw target senseGain eases toward
+bool     senseCueFresh = false;             // a cue arrived within SENSE_TIMEOUT_MS
+float    senseCx = 0.5f, senseCy = 0.5f;    // primary blob centroid, wall coords (X, Y)
+float    senseVx = 0.0f, senseVy = 0.0f;    // centroid velocity, wall units/sec (reserved)
+float    senseDepth = 0.0f;                 // primary blob distance, normalised 0..1 (1 = closest)
+float    sensePresence = 0.0f;              // how strongly a hand is present, 0..1
+uint8_t  senseBlobs = 0, sensePrevBlobs = 0;
+uint32_t senseLastCue = 0;                  // millis() of last accepted cue
+uint8_t  senseField[SENSE_FIELD_W * SENSE_FIELD_H] = { 0 };  // 0 empty, 1..255 near
+uint32_t senseLastField = 0;                // millis() of last accepted field frame
+
+// Routing matrix: each sensor axis (X, Y, Depth) maps to one destination with a
+// range + invert. Presets in the web UI are just default fills of this. The
+// conductor broadcasts it (SwarmSenseCfg) so the whole wall shares one routing.
+enum SenseDst : uint8_t {
+  SD_NONE = 0, SD_AMP, SD_FOCUSX, SD_FOCUSY, SD_SPOT, SD_PERIOD, SD_WAVELEN, SD_DIR, SD_COUNT
+};
+struct SenseCfg {                 // floats first so the wire/NVS layout stays 4-aligned
+  float   lo[3], hi[3];           // output range per axis X, Y, Z
+  float   spotR;                  // spotlight radius, wall units
+  uint8_t mode;                   // preset id (informational; 6 = custom)
+  uint8_t inv;                    // invert bits: b0 X, b1 Y, b2 Z
+  uint8_t dst[3];                 // destination per axis X, Y, Z
+};
+SenseCfg scfg = { { 0, 0, 0 }, { 1, 1, 1 }, 0.3f, 0, 0, { SD_NONE, SD_NONE, SD_NONE } };
+
+// Derived control values, eased once per tick in senseTask, read in modeSwarm.
+float    mFocusX = 0.5f, mFocusY = 0.5f;    // eased focus point (spotlight / ripple source)
+float    mSpot = 0.0f;                      // eased spotlight strength 0..1 (0 = layer off)
+bool     mFocusActive = false;              // focus is being driven by the sensor this tick
+bool     mPov[3] = { false, false, false }; // pattern param p0/p1/p2 override active
+float    mPval[3] = { 0, 0, 0 };            // override values
 
 float    swarmX = 0.5f, swarmY = 0.5f;  // wall position 0..1, NVS sw_x / sw_y
 bool     swarmConductor = false;        // NVS sw_cond
@@ -603,6 +654,72 @@ float swarmOverlay(uint32_t nowShared) {
   return sum;
 }
 
+// Run the routing matrix once per control tick (never inside the pattern, which
+// can be evaluated twice during a mode crossfade). Each sensor axis maps through
+// its range to a control value; amplitude falls back to presence, then to 1.0 on
+// sensor silence so the wall runs its designed choreography exactly as if no
+// sensor existed.
+void senseTask() {
+  bool fresh = senseEnabled && senseLastCue && (millis() - senseLastCue < SENSE_TIMEOUT_MS);
+  senseCueFresh = fresh;
+  float src[3] = { senseCx, senseCy, senseDepth };    // X, Y, Depth in 0..1
+  float ampTarget = -1.0f;                            // <0 => not routed
+  float focusTX = mFocusX, focusTY = mFocusY, spotT = 0.0f;
+  bool  focusRouted = false;
+  bool  pov[3] = { false, false, false };
+  float pval[3] = { 0, 0, 0 };
+  if (fresh) {
+    for (int a = 0; a < 3; a++) {
+      uint8_t dst = scfg.dst[a];
+      if (dst == SD_NONE) continue;
+      float vv = src[a]; if (scfg.inv & (1 << a)) vv = 1.0f - vv;
+      float out = scfg.lo[a] + (scfg.hi[a] - scfg.lo[a]) * vv;
+      switch (dst) {
+        case SD_AMP:     ampTarget = out; break;
+        case SD_FOCUSX:  focusTX = out; focusRouted = true; break;
+        case SD_FOCUSY:  focusTY = out; focusRouted = true; break;
+        case SD_SPOT:    spotT = out; break;
+        case SD_PERIOD:  pov[0] = true; pval[0] = out; break;
+        case SD_WAVELEN: pov[1] = true; pval[1] = out; break;
+        case SD_DIR:     pov[2] = true; pval[2] = out; break;
+      }
+    }
+  }
+  // Amplitude: explicit route wins, else presence (Wake), else ambient.
+  if (!fresh)              senseTarget = 1.0f;
+  else if (ampTarget >= 0) senseTarget = ampTarget;
+  else                     senseTarget = SENSE_IDLE_GAIN + (1.0f - SENSE_IDLE_GAIN) * sensePresence;
+  senseGain += (senseTarget - senseGain) * 0.02f;     // ~0.5s time constant at 100Hz
+  mFocusX += (focusTX - mFocusX) * 0.15f;
+  mFocusY += (focusTY - mFocusY) * 0.15f;
+  mSpot   += ((fresh ? spotT : 0.0f) - mSpot) * 0.08f;
+  mFocusActive = fresh && focusRouted;
+  for (int i = 0; i < 3; i++) { mPov[i] = pov[i]; mPval[i] = pval[i]; }
+}
+
+// Bilinear sample of the 8x8 depth field at wall position (x, y): 0 (empty) to
+// 1 (near). MIRROR turns that intensity into local motion, so devices under
+// the viewer move hardest, all pulsing on one shared breath so the wall reads
+// as a single silhouette rather than 64 independent flickers.
+float senseFieldBilinear(float x, float y) {
+  float fx = x * (SENSE_FIELD_W - 1), fy = y * (SENSE_FIELD_H - 1);
+  int x0 = (int)fx, y0 = (int)fy;
+  if (x0 < 0) x0 = 0; if (x0 > SENSE_FIELD_W - 2) x0 = SENSE_FIELD_W - 2;
+  if (y0 < 0) y0 = 0; if (y0 > SENSE_FIELD_H - 2) y0 = SENSE_FIELD_H - 2;
+  float tx = fx - x0, ty = fy - y0;
+  #define SF(a, b) (senseField[(b) * SENSE_FIELD_W + (a)] / 255.0f)
+  float a = SF(x0, y0) * (1 - tx) + SF(x0 + 1, y0) * tx;
+  float b = SF(x0, y0 + 1) * (1 - tx) + SF(x0 + 1, y0 + 1) * tx;
+  #undef SF
+  return a * (1 - ty) + b * ty;
+}
+
+float senseFieldSample(float x, float y) {
+  if (!senseLastField || millis() - senseLastField > SENSE_TIMEOUT_MS)
+    return 0.15f * sn(sharedMillis() / 6000.0);       // field lost: idle breathing
+  return senseFieldBilinear(x, y) * sn(sharedMillis() / 1500.0);
+}
+
 int modeSwarm(uint32_t now, int cap, bool entered) {
   (void)now; (void)entered;
   // A follower that has lost (or never had) the conductor holds still; the
@@ -610,10 +727,34 @@ int modeSwarm(uint32_t now, int cap, bool entered) {
   if (!swarmConductor &&
       (swarmLastBeacon == 0 || millis() - swarmLastBeacon > SWARM_TIMEOUT_MS)) return 0;
   uint32_t st = sharedMillis();
-  float v = swarmPattern(swarmPatternId, swarmX, swarmY, (double)st / 1000.0, swarmP);
+  float v;
+  if (swarmPatternId == SWARM_MIRROR) {
+    v = senseFieldSample(swarmX, swarmY);             // the wall mirrors the room
+  } else {
+    // Routed sensor controls override pattern params this tick; focus aims the
+    // RIPPLE source. Untouched params fall through, so the designed choreography
+    // is the default the moment the hand leaves.
+    float pp[4] = { swarmP[0], swarmP[1], swarmP[2], swarmP[3] };
+    if (senseCueFresh) {
+      if (mPov[0]) pp[0] = mPval[0];
+      if (mPov[1]) pp[1] = mPval[1];
+      if (mPov[2]) pp[2] = mPval[2];
+      if (swarmPatternId == 2 && mFocusActive) { pp[2] = mFocusX; pp[3] = mFocusY; }
+    }
+    v = swarmPattern(swarmPatternId, swarmX, swarmY, (double)st / 1000.0, pp);
+  }
+  // Spotlight layer: the device under the focus runs hard, neighbours fall off on
+  // a gaussian, the rest idle slow. Composes over any base pattern.
+  if (senseCueFresh && mSpot > 0.001f) {
+    float dx = swarmX - mFocusX, dy = swarmY - mFocusY;
+    float r = scfg.spotR > 0.02f ? scfg.spotR : 0.02f;
+    float g = 0.12f + 0.88f * expf(-(dx * dx + dy * dy) / (r * r)) * mSpot;
+    v *= g;
+  }
   v += swarmOverlay(st);
   if (v > 1.0f) v = 1.0f; else if (v < -1.0f) v = -1.0f;
-  return (int)(v * swarmAmp * cap);
+  float g = senseEnabled ? senseGain : 1.0f;
+  return (int)(v * swarmAmp * g * cap);
 }
 
 struct ModeDef {
@@ -943,6 +1084,9 @@ void loadSettings() {
   swarmY = prefs.getFloat("sw_y", 0.5f);
   swarmConductor = prefs.getBool("sw_cond", false);
   swarmKey = prefs.getUInt("sw_key", 0);
+  senseEnabled = prefs.getBool("sw_sense", true);
+  if (prefs.getBytesLength("sw_scfg") == sizeof(scfg))
+    prefs.getBytes("sw_scfg", &scfg, sizeof(scfg));   // else keep the compiled default
   Serial.printf("[nvs] restored mode=%u ceil=%d\n", mode, maxSpeedCeiling);
   Serial.printf("[swarm] pos=%.2f,%.2f role=%s\n", swarmX, swarmY,
                 swarmConductor ? "conductor" : "follower");
@@ -1058,15 +1202,17 @@ void userSelectMode(uint8_t m) {
 // ceiling deliberately boots to 0 and nobody wants to walk a wall of ten
 // sculptures raising every slider by hand. The local slider stays a hard cap:
 // pulling it to 0 mid-swarm silences this device only.
-// While the ceiling is auto-managed, it tracks the choreography amplitude so
-// raising the amplitude mid-swarm actually speeds the wall up instead of
-// hitting the engage-time seed. A human touching the local slider (speed
-// command) reclaims the cap and turns auto-follow off for this device.
+// An auto-managed ceiling runs at full scale, because amplitude is applied ONCE
+// in modeSwarm (v * swarmAmp * cap). Deriving the ceiling from amplitude too
+// would scale the wall quadratically and, worse, inconsistently: a device with
+// a hand-set cap scales linearly while an auto device scaled quadratically, so
+// the same amplitude change moved them by different amounts. Full-scale cap +
+// the single swarmAmp term makes every device respond to amplitude identically
+// (as a fraction of its own cap). A human touching the local slider reclaims
+// the cap and turns auto-follow off, keeping the slider a per-device safety cap.
 void swarmApplyAutoCeil() {
   if (!swarmCeilAuto) return;
-  int pct = (int)(swarmAmp * 100.0f);
-  if (pct < 1) pct = 1;
-  maxSpeedCeiling = map(pct, 1, 100, MANUAL_MIN_MOVE, FREQ_MAX);
+  maxSpeedCeiling = FREQ_MAX;
 }
 
 void swarmSetActive(bool on) {
@@ -1452,7 +1598,7 @@ DNSServer        dns;
 #define DEF_AP_PASS "kinetic123"
 #define DEF_HOST    "sculpture"
 #define OTA_PASS    "kinetic"    // required by the IDE when uploading over WiFi
-#define FW_VERSION  "2.2.0"      // shown in the UI; bump on each release
+#define FW_VERSION  "2.3.0"      // shown in the UI; bump on each release
 // Pre-filled into the OTA box so a fresh board can self-update with one tap. The
 // CI workflow publishes firmware.bin to this rolling "latest" release on push.
 #define DEF_FW_URL  "https://github.com/knnurl/kinesthetic/releases/download/latest/firmware.bin"
@@ -1528,6 +1674,45 @@ struct __attribute__((packed)) SwarmPing {
   uint32_t t;           // sender sharedTime at the gesture
   float    x, y;        // sender wall position
 };
+// Sensor node -> wall. KEEP IN SYNC WITH sensor_node/sensor_node.ino.
+struct __attribute__((packed)) SwarmCue {
+  SwarmHdr hdr;
+  uint8_t  type;        // 3 = cue
+  uint8_t  presence;    // 0..255 how strongly someone is present
+  uint8_t  blobs;       // near-region count 0..4
+  uint8_t  flags;       // bit0: field frames also broadcast
+  float    cx, cy;      // primary blob centroid, wall coords 0..1
+  float    vx, vy;      // centroid velocity, wall units/sec
+  float    depth;       // primary blob distance-from-wall, normalised 0..1 (1 = closest)
+};
+struct __attribute__((packed)) SwarmField {
+  SwarmHdr hdr;
+  uint8_t  type;        // 4 = field
+  uint8_t  w, h;        // grid dimensions
+  uint8_t  seq;
+  uint8_t  cells[SENSE_FIELD_W * SENSE_FIELD_H];   // 0 empty, 1..255 near, row-major
+};
+// Sensor routing config, conductor -> followers. Wall-only (the sensor node
+// never needs it). pad[3] puts the embedded SenseCfg (floats first) at offset 12
+// so its floats stay 4-aligned when the packet is cast in place.
+struct __attribute__((packed)) SwarmSenseCfg {
+  SwarmHdr hdr;
+  uint8_t  type;        // 5 = sense config
+  uint8_t  pad[3];
+  SenseCfg cfg;
+};
+// Presence announce for network discovery: every sculpture broadcasts this so
+// any device's page can list the whole fleet without typing addresses. Accepted
+// regardless of swarm key (you discover devices before linking them).
+struct __attribute__((packed)) SwarmHello {
+  SwarmHdr hdr;
+  uint8_t  type;        // 6 = hello
+  uint8_t  role;        // bit0: conductor
+  uint8_t  pad[2];
+  char     host[32];    // mDNS hostname (reach it at host.local)
+};
+struct SwarmPeer { uint32_t ip; uint32_t seen; uint8_t role; char host[32]; };
+SwarmPeer swarmPeers[SWARM_PEERS_MAX] = {};
 uint8_t swarmSeq = 0;
 
 void sendSwarmBeacon() {
@@ -1541,6 +1726,45 @@ void sendSwarmBeacon() {
   swarmUdp.beginPacket(IPAddress(255, 255, 255, 255), SWARM_UDP_PORT);
   swarmUdp.write((const uint8_t *)&b, sizeof(b));
   swarmUdp.endPacket();
+}
+
+// Conductor fans the sensor routing config out to the whole wall.
+void sendSwarmSenseCfg() {
+  SwarmSenseCfg m;
+  m.hdr.magic = SWARM_MAGIC; m.hdr.key = swarmKey;
+  m.type = 5; m.pad[0] = m.pad[1] = m.pad[2] = 0;
+  m.cfg = scfg;
+  swarmUdp.beginPacket(IPAddress(255, 255, 255, 255), SWARM_UDP_PORT);
+  swarmUdp.write((const uint8_t *)&m, sizeof(m));
+  swarmUdp.endPacket();
+}
+
+void sendSwarmHello() {
+  SwarmHello m;
+  m.hdr.magic = SWARM_MAGIC; m.hdr.key = swarmKey;
+  m.type = 6; m.role = swarmConductor ? 1 : 0; m.pad[0] = m.pad[1] = 0;
+  memset(m.host, 0, sizeof(m.host));
+  strncpy(m.host, hostName.c_str(), sizeof(m.host) - 1);
+  swarmUdp.beginPacket(IPAddress(255, 255, 255, 255), SWARM_UDP_PORT);
+  swarmUdp.write((const uint8_t *)&m, sizeof(m));
+  swarmUdp.endPacket();
+}
+
+// Upsert a discovered peer by IP, evicting the oldest entry when the table fills.
+void swarmNotePeer(uint32_t ip, uint8_t role, const char *host) {
+  int slot = -1, freeSlot = -1;
+  uint32_t oldest = 0xFFFFFFFF; int oldestSlot = 0;
+  for (int i = 0; i < SWARM_PEERS_MAX; i++) {
+    if (swarmPeers[i].seen && swarmPeers[i].ip == ip) { slot = i; break; }
+    if (!swarmPeers[i].seen && freeSlot < 0) freeSlot = i;
+    if (swarmPeers[i].seen < oldest) { oldest = swarmPeers[i].seen; oldestSlot = i; }
+  }
+  if (slot < 0) slot = (freeSlot >= 0) ? freeSlot : oldestSlot;
+  swarmPeers[slot].ip = ip;
+  swarmPeers[slot].seen = millis();
+  swarmPeers[slot].role = role;
+  memset(swarmPeers[slot].host, 0, sizeof(swarmPeers[slot].host));
+  strncpy(swarmPeers[slot].host, host, sizeof(swarmPeers[slot].host) - 1);
 }
 
 void swarmStorePing(uint32_t t, float x, float y) {
@@ -1577,13 +1801,24 @@ void swarmGesturePing() {
 void swarmNetTask() {
   int len = swarmUdp.parsePacket();
   if (len <= 0) return;
-  uint8_t buf[64] __attribute__((aligned(4)));
+  uint8_t buf[96] __attribute__((aligned(4)));   // >= sizeof(SwarmField) (77)
   if (len > (int)sizeof(buf)) { swarmUdp.flush(); return; }
   swarmUdp.read(buf, len);
   if (len < (int)(sizeof(SwarmHdr) + 1)) return;
   SwarmHdr *h = (SwarmHdr *)buf;
-  if (h->magic != SWARM_MAGIC || h->key != swarmKey) return;
+  if (h->magic != SWARM_MAGIC) return;
   uint8_t type = buf[sizeof(SwarmHdr)];
+
+  // Discovery hellos are accepted regardless of key so devices can find each
+  // other before they are linked; everything else requires the shared key.
+  if (type == 6 && len >= (int)sizeof(SwarmHello)) {
+    IPAddress rip = swarmUdp.remoteIP();
+    if (rip == WiFi.localIP()) return;       // skip our own broadcast
+    SwarmHello *hlo = (SwarmHello *)buf;
+    swarmNotePeer((uint32_t)rip, hlo->role, hlo->host);
+    return;
+  }
+  if (h->key != swarmKey) return;
 
   if (type == 1 && len >= (int)sizeof(SwarmBeacon)) {
     if (swarmConductor) return;              // our own broadcast, looped back
@@ -1623,6 +1858,30 @@ void swarmNetTask() {
     SwarmPing *p = (SwarmPing *)buf;
     swarmStorePing(p->t, constrain(p->x, 0.0f, 1.0f), constrain(p->y, 0.0f, 1.0f));
     Serial.println("[swarm] gesture ping rx");
+  } else if (type == 3 && len >= (int)sizeof(SwarmCue)) {
+    // Store raw signals; senseTask() does all the routing/mapping.
+    SwarmCue *c = (SwarmCue *)buf;
+    senseLastCue = millis();
+    sensePresence = constrain(c->presence / 255.0f, 0.0f, 1.0f);
+    senseDepth = constrain(c->depth, 0.0f, 1.0f);   // node sends normalised 0..1 (1 = closest)
+    senseCx = constrain(c->cx, 0.0f, 1.0f);
+    senseCy = constrain(c->cy, 0.0f, 1.0f);
+    senseVx = c->vx; senseVy = c->vy;
+    senseBlobs = c->blobs;
+    // A newly appeared blob (a second hand) drops a persistent ripple, so it
+    // layers a ring over whatever the first is already driving.
+    if (senseEnabled && c->blobs > sensePrevBlobs)
+      swarmStorePing(sharedMillis(), senseCx, senseCy);
+    sensePrevBlobs = c->blobs;
+  } else if (type == 4 && len >= (int)sizeof(SwarmField)) {
+    SwarmField *f = (SwarmField *)buf;
+    if (f->w == SENSE_FIELD_W && f->h == SENSE_FIELD_H) {
+      memcpy(senseField, f->cells, SENSE_FIELD_W * SENSE_FIELD_H);
+      senseLastField = millis();
+    }
+  } else if (type == 5 && len >= (int)sizeof(SwarmSenseCfg)) {
+    if (swarmConductor) return;               // our own broadcast, looped back
+    scfg = ((SwarmSenseCfg *)buf)->cfg;       // adopt the conductor's routing
   }
 }
 
@@ -1776,6 +2035,28 @@ void onWsEvent(uint8_t n, WStype_t type, uint8_t *payload, size_t len) {
     swarmKey = (uint32_t)(d["v"] | 0);
     prefs.putUInt("sw_key", swarmKey);
     Serial.println("[swarm] key set");
+  } else if (!strcmp(c, "sense")) {
+    senseEnabled = d["on"] | true;
+    prefs.putBool("sw_sense", senseEnabled);
+    Serial.printf("[sense] respond=%s\n", senseEnabled ? "on" : "off");
+  } else if (!strcmp(c, "sensecfg")) {
+    // Routing matrix lives on the conductor; SwarmSenseCfg fans it to the wall.
+    if (!swarmConductor) { ws.sendTXT(n, "{\"type\":\"err\",\"m\":\"not conductor\"}"); return; }
+    scfg.mode = (uint8_t)constrain((int)(d["mode"] | scfg.mode), 0, 6);
+    scfg.inv  = (uint8_t)((int)(d["inv"] | scfg.inv) & 0x07);
+    scfg.spotR = constrain((float)(d["spotR"] | scfg.spotR), 0.02f, 2.0f);
+    JsonArrayConst da = d["dst"].as<JsonArrayConst>();
+    JsonArrayConst la = d["lo"].as<JsonArrayConst>();
+    JsonArrayConst ha = d["hi"].as<JsonArrayConst>();
+    for (int a = 0; a < 3; a++) {
+      if (a < (int)da.size()) scfg.dst[a] = (uint8_t)constrain((int)(da[a] | 0), 0, SD_COUNT - 1);
+      if (a < (int)la.size()) scfg.lo[a] = constrain((float)(la[a] | 0.0f), -10.0f, 10.0f);
+      if (a < (int)ha.size()) scfg.hi[a] = constrain((float)(ha[a] | 1.0f), -10.0f, 10.0f);
+    }
+    prefs.putBytes("sw_scfg", &scfg, sizeof(scfg));
+    sendSwarmSenseCfg();   // reach the wall immediately
+    Serial.printf("[sense] cfg mode=%u dst=%u,%u,%u\n",
+                  scfg.mode, scfg.dst[0], scfg.dst[1], scfg.dst[2]);
   } else if (!strcmp(c, "swarm")) {
     // Choreography lives on the conductor; the UDP beacon fans it out.
     if (!swarmConductor) { ws.sendTXT(n, "{\"type\":\"err\",\"m\":\"not conductor\"}"); return; }
@@ -1826,12 +2107,13 @@ void sendTelemetry() {
     queueOffPending = false;
     wsSendAll("{\"type\":\"queueoff\"}");
   }
-  char buf[512];   // grown for the swarm block; snprintf truncates silently if undersized
+  char buf[576];   // grown for the swarm + sensor blocks; snprintf truncates silently if undersized
   snprintf(buf, sizeof(buf),
     "{\"type\":\"tele\",\"mode\":%u,\"enabled\":%s,\"speed\":%d,\"qi\":%d,\"gesture\":\"%s\","
     "\"derate\":%d,\"fault\":{\"tmc\":%s,\"otp\":%s,\"tof\":%s},\"sg\":%u,"
     "\"netmode\":\"%s\",\"netip\":\"%s\",\"sl\":%d,"
     "\"sw\":{\"on\":%d,\"cond\":%d,\"sync\":%d,\"x\":%.2f,\"y\":%.2f,\"pat\":%u,\"amp\":%.2f},"
+    "\"sen\":{\"en\":%d,\"cue\":%d,\"g\":%.2f,\"blobs\":%u,\"mode\":%u},"
     "\"leds\":" LEDS_JSON "}",
     mode, motorEnabled ? "true" : "false", appliedFreq,
     (queueEnabled && queueLen && queueStepStart) ? (int)queueIdx : -1, gestureName(),
@@ -1842,7 +2124,8 @@ void sendTelemetry() {
     sgLoad, netMode.c_str(), netIp.c_str(), sliderPctForTele(),
     (mode == MODE_SWARM) ? 1 : 0, swarmConductor ? 1 : 0,
     (swarmConductor || (swarmLastBeacon && millis() - swarmLastBeacon < SWARM_TIMEOUT_MS)) ? 1 : 0,
-    swarmX, swarmY, swarmPatternId, swarmAmp);
+    swarmX, swarmY, swarmPatternId, swarmAmp,
+    senseEnabled ? 1 : 0, senseCueFresh ? 1 : 0, senseGain, senseBlobs, scfg.mode);
   wsSendAll(buf);
 }
 
@@ -2060,6 +2343,24 @@ void startServers() {
     b += "]}";
     http.send(200, "application/json", b);
   });
+  http.on("/peers", []() {
+    if (!httpAuthed()) { http.send(401, "application/json", "{\"err\":\"auth\"}"); return; }
+    // Devices heard announcing on the LAN within the TTL. The page uses this to
+    // auto-populate the fleet: no typing addresses one by one.
+    String b = "{\"peers\":[";
+    uint32_t now = millis();
+    bool first = true;
+    for (int i = 0; i < SWARM_PEERS_MAX; i++) {
+      if (!swarmPeers[i].seen || now - swarmPeers[i].seen > SWARM_PEER_TTL_MS) continue;
+      IPAddress ip(swarmPeers[i].ip);
+      if (!first) b += ",";
+      first = false;
+      b += "{\"host\":\"" + String(swarmPeers[i].host) + "\",\"ip\":\"" + ip.toString() +
+           "\",\"cond\":" + (swarmPeers[i].role & 1 ? "1" : "0") + "}";
+    }
+    b += "]}";
+    http.send(200, "application/json", b);
+  });
 #ifdef ENABLE_LEDS
   http.on("/led", []() {
     if (!httpAuthed()) { http.send(401, "application/json", "{\"err\":\"auth\"}"); return; }
@@ -2239,6 +2540,14 @@ void loop() {
     sendSwarmBeacon();
     if (!swarmActive && swarmReleaseBeacons) swarmReleaseBeacons--;
   }
+  // Conductor refreshes the sensor routing config at 1Hz so a rejoining follower
+  // picks it up (immediate resend also happens on each change).
+  static uint32_t tScfg = 0;
+  if (swarmConductor && swarmActive && now - tScfg >= 1000) { tScfg = now; sendSwarmSenseCfg(); }
+  // Presence announce so any device's page can discover the fleet (all devices,
+  // any swarm state, as long as the network is up).
+  static uint32_t tHello = 0;
+  if (netMode.length() && now - tHello >= SWARM_HELLO_MS) { tHello = now; sendSwarmHello(); }
   static uint32_t tNet = 0;
   if (now - tNet >= 1000) { tNet = now; netWatchdog(); }   // STA link supervision
 #endif
@@ -2252,6 +2561,7 @@ void loop() {
 #endif
     if (!otaActive) {            // hold still while firmware is being written
       queueTask();              // advance mode queue if enabled
+      senseTask();              // ease sensor presence gain + motion direction
       targetFreq = (int)(modeTarget() * speedDerate);
       applyMotion();
     }

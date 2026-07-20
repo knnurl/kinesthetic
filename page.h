@@ -203,7 +203,8 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
   <span class="eyebrow">Fleet</span>
   <div class="sub" style="margin:8px 0 12px">Command several sculptures from this one page. Add each one's address (e.g. <b>sculpture-3F2A.local</b> or its IP). If they share this sculpture's password, they unlock automatically.</div>
   <div id="flist"></div>
-  <div class="row" style="margin-top:8px"><input class="ti" id="fhost" placeholder="sculpture-XXXX.local" style="flex:1;min-width:0" onkeydown="if(event.key=='Enter')fleetAdd()"><button class="nbtn" style="margin-left:8px" onclick="fleetAdd()">Add</button></div>
+  <button class="nbtn" style="width:100%;margin-top:10px" onclick="fleetScan(true)">Scan network for sculptures</button>
+  <div class="row" style="margin-top:8px"><input class="ti" id="fhost" placeholder="or add manually: sculpture-XXXX.local" style="flex:1;min-width:0" onkeydown="if(event.key=='Enter')fleetAdd()"><button class="nbtn" style="margin-left:8px" onclick="fleetAdd()">Add</button></div>
  </div>
  <div class="card">
   <div class="row"><label>Mirror my controls to the fleet</label><input id="fmir" type="checkbox" class="sw" onchange="localStorage.ks_fmir=this.checked?'1':''"></div>
@@ -230,6 +231,7 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
    <div class="chip" id="sw_p2" onclick="swPat(2)">Ripple</div>
    <div class="chip" id="sw_p3" onclick="swPat(3)">Cascade</div>
    <div class="chip" id="sw_p4" onclick="swPat(4)">Flock</div>
+   <div class="chip" id="sw_p5" onclick="swPat(5)">Mirror</div>
   </div>
   <div class="row" style="margin-top:14px"><label>Amplitude</label><span class="val" id="swav">50%</span></div>
   <input type="range" id="swamp" min="0" max="100" value="50" oninput="swParam()">
@@ -241,6 +243,24 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
   <input type="range" id="sws2" oninput="swParam()">
   <div class="row" style="margin-top:10px"><label>Speed slider drives the swarm</label><input id="swsl" type="checkbox" class="sw" checked onchange="localStorage.ks_swsl=this.checked?'1':'0'"></div>
   <div class="sub" style="margin:4px 0 6px">While engaged, the Control tab's speed slider sets the whole wall's amplitude in one move; no send button needed.</div>
+  <div class="row" style="margin-top:6px"><label>Respond to the room sensor</label><input id="swsen" type="checkbox" class="sw" checked onchange="swSense(this.checked)"></div>
+  <div class="sub" id="swsennote" style="margin:4px 0 6px">A VL53L5CX hand sensor can drive the wall. Pick a mode below. No sensor detected yet.</div>
+  <div class="grid4" id="scpresets" style="margin-top:4px">
+   <div class="chip" id="sc_m0" onclick="scPreset(0)">Off</div>
+   <div class="chip" id="sc_m1" onclick="scPreset(1)">Wake</div>
+   <div class="chip" id="sc_m2" onclick="scPreset(2)">Theremin</div>
+   <div class="chip" id="sc_m3" onclick="scPreset(3)">Ripple pen</div>
+   <div class="chip" id="sc_m4" onclick="scPreset(4)">Spotlight</div>
+   <div class="chip" id="sc_m5" onclick="scPreset(5)">Mirror</div>
+  </div>
+  <div class="row" style="margin-top:10px"><label>Advanced: route each axis</label><input id="scadv" type="checkbox" class="sw" onchange="scAdvv.style.display=this.checked?'block':'none'"></div>
+  <div id="scAdvv" style="display:none">
+   <div class="sub" style="margin:4px 0 6px">Map each hand signal to a wall effect. Editing marks the mode Custom.</div>
+   <div id="scrows"></div>
+   <div class="fr"><label>Spotlight radius</label><input id="scspotr" class="ti" type="number" min="0.05" max="1" step="0.05" value="0.3" oninput="scEdit()"></div>
+  </div>
+  <div class="row" style="margin-top:10px"><label>Preview hand depth</label><span class="val" id="scdv">off</span></div>
+  <input type="range" id="scd" min="0" max="100" value="0" oninput="scdv.textContent=this.value>0?this.value+'%':'off'">
   <div class="row" style="margin-top:6px"><label>This sculpture is the conductor</label><button class="nbtn" id="swcondl" onclick="swMakeCond(-1)">Set</button></div>
   <div class="grid2" style="margin-top:12px">
    <button class="save" style="margin-top:0" onclick="swEngage(true)">Engage swarm</button>
@@ -295,8 +315,11 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
   <div class="row"><label>Installed version</label><span class="val" id="fwver">-</span></div>
   <label style="margin-top:10px;display:block">Update from URL (a .bin, e.g. a GitHub release)</label>
   <input id="fwurl" class="ti" placeholder="https://github.com/you/repo/releases/latest/download/firmware.bin">
-  <button class="save" onclick="doUpdate()">Download &amp; install</button>
-  <div class="sub" id="fwnote" style="margin-top:10px">Needs the sculpture joined to an internet network (Join wifi above). It downloads, installs, and reboots. Keep it powered.</div>
+  <div class="grid2">
+   <button class="save" style="margin-top:0" onclick="doUpdate()">Download &amp; install</button>
+   <button class="save ghost" style="margin-top:0" onclick="doUpdateFleet()">Update fleet firmware</button>
+  </div>
+  <div class="sub" id="fwnote" style="margin-top:10px">Needs the sculpture joined to an internet network (Join wifi above). It downloads, installs, and reboots. Keep it powered. "Update fleet firmware" tells every connected sculpture to pull the same .bin.</div>
  </div>
 </div>
 
@@ -375,7 +398,7 @@ function spSend(v){lastSpSent=Date.now();
  if(swSliderDrive()){SW.amp=Math.abs(v)/100;swUi();swSave();swSendCmd(true);return;}
  const o={cmd:'speed',v:v};cmd(o);if(fmir.checked)fleetSend(o);}
 function spShow(v){v=+v;spv.textContent=v?((v>0?'+':'')+v+'% '+(v>0?'fwd':'rev')):'stop';}
-function tab(t){let p={c:pc,m:pm,l:pl,f:pf,n:pn,h:ph},b={c:tc,m:tm,l:tl,f:tf,n:tn,h:th};for(let k in p){p[k].style.display=k==t?'block':'none';b[k].className='tab'+(k==t?' on':'');}if(t=='n')loadNet();if(t=='m')loadMotion();if(t=='l'&&!ledLoaded)loadLed();if(t=='f'){renderFleet();for(let h of FP)fleetConnect(h);}}
+function tab(t){let p={c:pc,m:pm,l:pl,f:pf,n:pn,h:ph},b={c:tc,m:tm,l:tl,f:tf,n:tn,h:th};for(let k in p){p[k].style.display=k==t?'block':'none';b[k].className='tab'+(k==t?' on':'');}if(t=='n')loadNet();if(t=='m')loadMotion();if(t=='l'&&!ledLoaded)loadLed();if(t=='f'){renderFleet();for(let h of FP)fleetConnect(h);fleetScan(false);}}
 function boot(){flushQ();if(booted)return;booted=true;loadMotion();
  api('/fleet').then(r=>r.json()).then(j=>fleetMerge(j.l)).catch(e=>{});
  if(!localStorage.ks_seen){wel.style.display='flex';}}
@@ -427,6 +450,7 @@ function connect(){
   en=t.enabled;let eb=document.getElementById('en');eb.className='power'+(en?' on':'');eb.textContent=en?'Motor enabled':'Motor enable';
   for(let i=0;i<8;i++)document.getElementById('m'+i).className='chip'+(t.mode==i?' on':'');
   if(t.sw){SWL=t.sw;swcondl.className='nbtn'+(SWL.cond?' on':'');swcondl.textContent=SWL.cond?'Yes':'Set';}
+  if(t.sen){SEN=t.sen;if(!senInit){senInit=true;swsen.checked=!!SEN.en;}swSenseStatus();}
   if(t.qi!==qi){qi=t.qi;markQueueRow();}
   if(t.leds&&!ledSeen){ledSeen=true;tl.style.display='';loadLed();}
   if(swSliderDrive()){ // slider mirrors the wall amplitude, not the local ceiling
@@ -465,6 +489,16 @@ function fleetMerge(l){let added=false;
 function fleetPushRoster(){let r=FP.slice();if(SELFH)r.push(SELFH+'.local');
  let o={cmd:'fleet',l:r};cmd(o);
  for(let h of FP){let sk=FS[h];if(sk&&sk.readyState==1&&FST[h]==2)sk.send(JSON.stringify(o));}}
+// Auto-discovery: ask the connected device which sculptures it has heard
+// announcing on the LAN (UDP hello) and add any new ones. loud=true shows a
+// status line (button press); loud=false is the quiet auto-scan on tab open.
+function fleetScan(loud){api('/peers').then(r=>r.json()).then(j=>{
+  let added=0;
+  for(const p of (j.peers||[])){let h=p.host?p.host+'.local':p.ip;
+   if(!h||isSelfHost(h)||FP.includes(h))continue;FP.push(h);added++;}
+  if(added){fleetSave();renderFleet();for(let h of FP)fleetConnect(h);fleetPushRoster();}
+  if(loud||added)flash(fnote,added?('Found '+added+' sculpture'+(added>1?'s':'')):'No new sculptures on the network','');
+ }).catch(e=>{if(loud)flash(fnote,'Scan needs this sculpture on WiFi (not AP mode)','');});}
 function fleetAdd(){let h=fhost.value.trim();if(!h||FP.includes(h))return;FP.push(h);fhost.value='';fleetSave();renderFleet();fleetConnect(h);fleetPushRoster();}
 function fleetDel(i){let h=FP[i];FP.splice(i,1);fleetSave();try{FS[h]&&FS[h].close();}catch(e){}delete FS[h];delete FST[h];delete FSW[h];renderFleet();fleetPushRoster();}
 function fleetConnect(h){
@@ -479,7 +513,7 @@ function fleetConnect(h){
   if(t.type=='hello'){if(t.auth){sk.send(JSON.stringify({cmd:'auth',pw:PW}));}else{FST[h]=2;renderFleet();}return;}
   if(t.type=='authok'){FST[h]=2;renderFleet();return;}
   if(t.type=='authfail'){FST[h]=3;renderFleet();return;}
-  if(t.type=='tele'&&t.sw){let had=FSW[h];FSW[h]=t.sw;
+  if(t.type=='tele'&&t.sw){let had=FSW[h];FSW[h]=t.sw;if(t.sen){FSN[h]=t.sen;swSenseStatus();}
    if(!had||had.cond!=t.sw.cond||had.on!=t.sw.on||had.sync!=t.sw.sync)renderFleet();return;}};
 }
 function renderFleet(){let html='';FP.forEach((h,i)=>{
@@ -503,12 +537,15 @@ setInterval(()=>{for(let h of FP){if(!FS[h]||FS[h].readyState>=2)fleetConnect(h)
 // are pushed to the conductor over its websocket, and fan out to the
 // followers via the conductor's UDP clock beacon.
 let FSW={},SWL=null,SWPOS={},SWDRAG=null,SWTAP=null,SIMP=[],lastSwSent=0,swPosSent={};
+let SEN=null,FSN={},senInit=false;   // local + peer sensor telemetry (sw.sen blocks)
 const SWDEF=[
  {n:'Unison', p:[12,1,0,0],    ui:[[0,'Period s',2,60,1]]},
  {n:'Wave',   p:[12,0.8,0,0],  ui:[[0,'Period s',2,60,1],[1,'Wavelength',0.2,3,0.05],[2,'Direction rad',0,6.28,0.05]]},
  {n:'Ripple', p:[10,0.5,0.5,0.5],ui:[[0,'Period s',2,60,1],[1,'Ring spacing',0.1,2,0.05]]},
  {n:'Cascade',p:[16,0.15,0,0], ui:[[0,'Cycle s',2,60,1],[1,'Pulse width',0.05,0.5,0.01]]},
- {n:'Flock',  p:[30,1,0,0],    ui:[[0,'Drift s',5,120,1],[1,'Spatial scale',0.2,3,0.05]]}];
+ {n:'Flock',  p:[30,1,0,0],    ui:[[0,'Drift s',5,120,1],[1,'Spatial scale',0.2,3,0.05]]},
+ {n:'Mirror', p:[0,0,0,0],     ui:[]}];   // driven by the room sensor; move the mouse over the preview to fake a person
+let SWMOUSE={x:0.5,y:0.5,on:false};   // preview stand-in for the sensor blob
 let SW=JSON.parse(localStorage.ks_swarm||'null')||{pat:1,amp:0.5,p:SWDEF[1].p.slice()};
 function swSave(){localStorage.ks_swarm=JSON.stringify(SW);}
 const sn=ph=>{ph-=Math.floor(ph);return Math.sin(ph*6.283185307179586);};
@@ -538,18 +575,35 @@ function swSize(){let r=swcv.getBoundingClientRect();
 function swDraw(){swSize();let g=swcv.getContext('2d'),W=swcv.width,H=swcv.height;
  g.clearRect(0,0,W,H);
  let t=performance.now()/1000,hue=+getComputedStyle(document.documentElement).getPropertyValue('--h')||210;
+ let hand=scHand(),ctl=scControls(hand);   // simulated sensor hand + routed controls
+ let amp=SW.amp*(hand.on?ctl.amp:1);
  for(const d of swDevs()){let p=swGet(d.k),x=p.x*W,y=p.y*H;
-  let v=swarmPattern(SW.pat,p.x,p.y,t,SW.p)+swOverlaySim(p.x,p.y,t);
+  let pp=SW.p.slice();
+  if(hand.on){if(ctl.pov[0])pp[0]=ctl.pval[0];if(ctl.pov[1])pp[1]=ctl.pval[1];if(ctl.pov[2])pp[2]=ctl.pval[2];
+   if(SW.pat==2&&ctl.focus){pp[2]=ctl.fx;pp[3]=ctl.fy;}}
+  let v=(SW.pat==5?swMirrorSim(p.x,p.y,t,hand):swarmPattern(SW.pat,p.x,p.y,t,pp))+swOverlaySim(p.x,p.y,t);
+  if(hand.on&&ctl.spot>0.001){let dx=p.x-ctl.fx,dy=p.y-ctl.fy,rr=Math.max(SC.spotR,0.02);
+   v*=0.12+0.88*Math.exp(-(dx*dx+dy*dy)/(rr*rr))*ctl.spot;}
   v=Math.max(-1,Math.min(1,v));
-  let r=(6+10*Math.abs(v)*SW.amp)*dpr,s=swInfo(d.k);
+  let r=(6+10*Math.abs(v)*amp)*dpr,s=swInfo(d.k);
   g.beginPath();g.arc(x,y,r,0,6.2832);
   g.fillStyle='hsla('+(v>=0?hue:(hue+150)%360)+',85%,60%,'+(0.25+0.55*Math.abs(v))+')';g.fill();
   if(s&&s.cond){g.beginPath();g.arc(x,y,r+4*dpr,0,6.2832);
    g.strokeStyle='hsl('+hue+',85%,70%)';g.lineWidth=1.5*dpr;g.stroke();}
   g.fillStyle='rgba(160,170,195,.9)';g.font=(9*dpr)+'px monospace';g.textAlign='center';
   g.fillText(d.h.split('.')[0].slice(-10)+(s&&s.on&&!s.sync&&!s.cond?' ?':''),x,y+r+11*dpr);}
- if(SW.pat==2){let x=SW.p[2]*W,y=SW.p[3]*H;g.strokeStyle='rgba(255,255,255,.5)';g.lineWidth=dpr;
-  g.beginPath();g.moveTo(x-5*dpr,y);g.lineTo(x+5*dpr,y);g.moveTo(x,y-5*dpr);g.lineTo(x,y+5*dpr);g.stroke();}}
+ // Ripple source marker (from routed focus if active, else the pattern param).
+ if(SW.pat==2){let fx=(hand.on&&ctl.focus?ctl.fx:SW.p[2]),fy=(hand.on&&ctl.focus?ctl.fy:SW.p[3]);
+  let x=fx*W,y=fy*H;g.strokeStyle='rgba(255,255,255,.5)';g.lineWidth=dpr;
+  g.beginPath();g.moveTo(x-5*dpr,y);g.lineTo(x+5*dpr,y);g.moveTo(x,y-5*dpr);g.lineTo(x,y+5*dpr);g.stroke();}
+ // Hand marker whenever a sensor mode is simulating a hand.
+ if(hand.on&&SWMOUSE.on){g.strokeStyle='rgba(255,255,255,.35)';g.lineWidth=dpr;
+  g.beginPath();g.arc(SWMOUSE.x*W,SWMOUSE.y*H,(10+16*hand.z)*dpr,0,6.2832);g.stroke();}}
+// MIRROR preview: the simulated hand stands in for the sensor's view; nearer
+// devices pulse harder, on one shared breath, like the firmware. Depth scales it.
+function swMirrorSim(x,y,t,hand){if(!hand||!hand.on)return 0.15*sn(t/6);
+ let d=Math.hypot(x-hand.x,y-hand.y),inten=Math.max(0,1-d/0.35)*(0.3+0.7*hand.z);
+ return inten*sn(t/1.5);}
 function swLoop(){if(pf.style.display!='none')swDraw();requestAnimationFrame(swLoop);}
 function swPt(e){let r=swcv.getBoundingClientRect();
  return{x:Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),y:Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))};}
@@ -557,14 +611,16 @@ swcv.onpointerdown=e=>{swcv.setPointerCapture(e.pointerId);let q=swPt(e),best=nu
  for(const d of swDevs()){let p=swGet(d.k),dd=Math.hypot(p.x-q.x,p.y-q.y);if(dd<bd){bd=dd;best=d.k;}}
  SWTAP=q;if(best)SWDRAG=best;
  else if(SW.pat==2){SW.p[2]=q.x;SW.p[3]=q.y;swUi();swSave();swPush();}};
-swcv.onpointermove=e=>{if(SWDRAG)SWPOS[SWDRAG]=swPt(e);};
+swcv.onpointermove=e=>{if(SWDRAG)SWPOS[SWDRAG]=swPt(e);
+ if(SC.mode>0){let q=swPt(e);SWMOUSE={x:q.x,y:q.y,on:true};}};
+swcv.onpointerleave=()=>{SWMOUSE.on=false;};
 swcv.onpointerup=e=>{if(!SWDRAG)return;let q=swPt(e),k=SWDRAG;SWDRAG=null;
  if(SWTAP&&Math.hypot(q.x-SWTAP.x,q.y-SWTAP.y)<0.02){SIMP.push({t:performance.now()/1000,x:q.x,y:q.y});return;}
  SWPOS[k]=q;swSendPos(k,q);};
 function swRow(){let ds=swDevs(),n=ds.length;ds.forEach((d,i)=>{
  let p={x:n>1?i/(n-1):0.5,y:0.5};SWPOS[d.k]=p;swSendPos(d.k,p);});}
 function swPat(i){SW.pat=i;SW.p=SWDEF[i].p.slice();swUi();swSave();swPush();}
-function swUi(){for(let i=0;i<5;i++)document.getElementById('sw_p'+i).className='chip'+(SW.pat==i?' on':'');
+function swUi(){for(let i=0;i<6;i++)document.getElementById('sw_p'+i).className='chip'+(SW.pat==i?' on':'');
  swamp.value=Math.round(SW.amp*100);swav.textContent=Math.round(SW.amp*100)+'%';
  let ui=SWDEF[SW.pat].ui;
  for(let i=0;i<3;i++){let r=document.getElementById('swr'+i),s=document.getElementById('sws'+i);
@@ -577,6 +633,51 @@ function swParam(){SW.amp=+swamp.value/100;let ui=SWDEF[SW.pat].ui;
  swUi();swSave();swPush();}
 function swCondTarget(){if(SWL&&SWL.cond)return '_';
  for(const h of FP)if(FSW[h]&&FSW[h].cond&&FST[h]==2)return h;return null;}
+// ---------- Sensor routing matrix (mirrors the wall's senseTask/modeSwarm) ----------
+const SCDST=['none','amplitude','focus X','focus Y','spotlight','period','wavelength','direction'];
+// preset -> base pattern (null = leave as is) + routing (dst/lo/hi per axis X,Y,Depth).
+const SCPRE={
+ 0:{pat:null,dst:[0,0,0],lo:[0,0,0],hi:[1,1,1],inv:0,spotR:0.3},
+ 1:{pat:null,dst:[0,0,1],lo:[0,0,0.3],hi:[1,1,1],inv:0,spotR:0.3},
+ 2:{pat:1,   dst:[7,6,1],lo:[0,0.3,0.2],hi:[6.28,1.5,1],inv:0,spotR:0.3},
+ 3:{pat:2,   dst:[2,3,1],lo:[0,0,0.3],hi:[1,1,1],inv:0,spotR:0.3},
+ 4:{pat:0,   dst:[2,3,4],lo:[0,0,0],hi:[1,1,1],inv:0,spotR:0.3},
+ 5:{pat:5,   dst:[0,0,1],lo:[0,0,0.3],hi:[1,1,1],inv:0,spotR:0.3}};
+const SCNAME=['Off','Wake','Theremin','Ripple pen','Spotlight','Mirror'];
+let SC=JSON.parse(localStorage.ks_scfg||'null')||{mode:0,dst:[0,0,0],lo:[0,0,0],hi:[1,1,1],inv:0,spotR:0.3};
+let lastScSent=0;
+function scSave(){localStorage.ks_scfg=JSON.stringify(SC);}
+function scSend(){let k=swCondTarget();if(k===null)return;
+ swSendTo(k,{cmd:'sensecfg',mode:SC.mode,dst:SC.dst,lo:SC.lo,hi:SC.hi,inv:SC.inv,spotR:SC.spotR});}
+function scSendThrottled(){if(Date.now()-lastScSent<250)return;lastScSent=Date.now();scSend();}
+function scPreset(i){let p=SCPRE[i];SC={mode:i,dst:p.dst.slice(),lo:p.lo.slice(),hi:p.hi.slice(),inv:p.inv,spotR:p.spotR};
+ scSave();scUi();scRenderRows();
+ if(p.pat!==null){SW.pat=p.pat;SW.p=SWDEF[p.pat].p.slice();swUi();swSave();swPush();}
+ if(i>0&&!swsen.checked){swsen.checked=true;swSense(true);}
+ scSend();flash(swnote,i==0?'Sensor off':('Sensor mode: '+SCNAME[i]),'');}
+function scEdit(){SC.mode=6;scSave();scUi();scSendThrottled();}
+function scUi(){for(let i=0;i<6;i++)document.getElementById('sc_m'+i).className='chip'+(SC.mode==i?' on':'');
+ scspotr.value=SC.spotR;}
+function scRenderRows(){const ax=['X','Y','Depth'];let h='';
+ for(let a=0;a<3;a++){let opts=SCDST.map((d,k)=>'<option value="'+k+'"'+(SC.dst[a]==k?' selected':'')+'>'+d+'</option>').join('');
+  h+='<div class="qrow"><span class="sub" style="width:42px;flex:0 0 auto">'+ax[a]+'</span>'
+   +'<select style="flex:1" onchange="SC.dst['+a+']=+this.value;scEdit()">'+opts+'</select>'
+   +'<input type="number" step="0.1" value="'+SC.lo[a]+'" title="min" onchange="SC.lo['+a+']=+this.value;scEdit()" style="width:52px">'
+   +'<input type="number" step="0.1" value="'+SC.hi[a]+'" title="max" onchange="SC.hi['+a+']=+this.value;scEdit()" style="width:52px">'
+   +'<input type="checkbox" class="sw" title="invert"'+((SC.inv>>a&1)?' checked':'')+' onchange="SC.inv=(SC.inv&~(1<<'+a+'))|(this.checked?(1<<'+a+'):0);scEdit()"></div>';}
+ scrows.innerHTML=h;}
+// Simulated sensor hand for the preview: mouse = X/Y, depth slider = Z.
+function scHand(){let z=+scd.value/100,on=(SWMOUSE.on||z>0)&&SC.mode>0;
+ return{on:on,x:SWMOUSE.on?SWMOUSE.x:0.5,y:SWMOUSE.on?SWMOUSE.y:0.5,z:z};}
+// Route the hand through the matrix -> control values (mirrors senseTask).
+function scControls(h){let c={amp:1,fx:0.5,fy:0.5,spot:0,focus:false,pov:[0,0,0],pval:[0,0,0]};
+ if(!h.on)return c;let src=[h.x,h.y,h.z],ampR=-1;
+ for(let a=0;a<3;a++){let d=SC.dst[a];if(!d)continue;let v=src[a];if(SC.inv>>a&1)v=1-v;
+  let out=SC.lo[a]+(SC.hi[a]-SC.lo[a])*v;
+  if(d==1)ampR=out;else if(d==2){c.fx=out;c.focus=true;}else if(d==3){c.fy=out;c.focus=true;}
+  else if(d==4)c.spot=out;else if(d==5){c.pov[0]=1;c.pval[0]=out;}
+  else if(d==6){c.pov[1]=1;c.pval[1]=out;}else if(d==7){c.pov[2]=1;c.pval[2]=out;}}
+ c.amp=ampR>=0?ampR:1;return c;}
 // True while the main speed slider should steer swarm amplitude: toggle on,
 // swarm engaged somewhere, and a conductor reachable to receive the change.
 function swSliderDrive(){return swsl.checked&&((SWL&&SWL.on)||Object.values(FSW).some(s=>s&&s.on))&&swCondTarget()!==null;}
@@ -596,6 +697,16 @@ function swLinkKey(){let k=+(localStorage.ks_swkey||0);
  if(!k){k=Math.floor(Math.random()*4294967294)+1;localStorage.ks_swkey=k;}
  for(const d of swDevs())swSendTo(d.k,{cmd:'swarmkey',v:k});
  flash(swnote,'Devices linked with a shared swarm key','');}
+// Turn the room sensor response on/off across the whole wall (per-device pref).
+function swSense(on){for(const d of swDevs())swSendTo(d.k,{cmd:'sense',on:on});
+ flash(swnote,on?'The wall will respond to the room sensor':'Sensor response off','');}
+// Reflect whether any device is currently hearing sensor cues.
+function swSenseStatus(){let any=(SEN&&SEN.cue)||Object.values(FSN).some(s=>s&&s.cue);
+ let seen=(SEN&&SEN.en!==undefined)||Object.keys(FSN).length;
+ if(!swsennote)return;
+ swsennote.textContent=any?'Sensor active: the wall is reacting to the room.':
+  (seen?'Sensor idle (no one in view), or no sensor node broadcasting yet.':
+   'A VL53L5CX sensor node can wake the wall, aim ripples, and drive Mirror. None detected yet.');}
 
 function setSta(v){staMode=v;document.getElementById('nmSta').className='nbtn'+(v?' on':'');document.getElementById('nmAp').className='nbtn'+(v?'':' on');staF.style.display=v?'block':'none';apF.style.display=v?'none':'block';}
 function updS(){stF.style.display=us.checked?'block':'none';}
@@ -605,6 +716,15 @@ function loadNet(){api('/net').then(r=>r.json()).then(j=>{
  fwver.textContent=j.fwver||'-';fwurl.value=j.fwurl||'';
  note.textContent='Now: '+j.mode+' '+j.cur;});}
 function doUpdate(){if(!fwurl.value){fwnote.textContent='Enter a .bin URL first';return;}fwnote.textContent='Starting...';cmd({cmd:'fwupdate',url:fwurl.value});}
+// Tell every connected fleet sculpture (and this one) to pull the same .bin.
+// Peers first so this page stays alive to report, then this device last.
+function doUpdateFleet(){if(!fwurl.value){fwnote.textContent='Enter a .bin URL first';return;}
+ let ready=FP.filter(h=>{let sk=FS[h];return sk&&sk.readyState==1&&FST[h]==2;});
+ if(!confirm('Update this sculpture and '+ready.length+' connected peer'+(ready.length==1?'':'s')+'? Each downloads the .bin and reboots. Keep them powered.'))return;
+ let o={cmd:'fwupdate',url:fwurl.value};
+ for(let h of ready)FS[h].send(JSON.stringify(o));
+ fwnote.textContent='Fleet update: '+ready.length+' peer'+(ready.length==1?'':'s')+' told to update. Updating this one last...';
+ setTimeout(()=>cmd(o),1500);}
 function saveNet(){
  let o={cmd:'netcfg',sta:staMode,ssid:ssid.value,apssid:apssid.value,apip:apip.value,host:host.value,
   static:us.checked,ip:ip.value,gw:gw.value,mask:mask.value};
@@ -688,7 +808,7 @@ setTheme(localStorage.ks_theme=='light'?'light':'dark');
 fmir.checked=!!localStorage.ks_fmir;
 swsl.checked=localStorage.ks_swsl!=='0';   // default on
 renderFleet();
-swUi();swLoop();   // swarm designer: sliders + canvas preview (draws only while Fleet tab is open)
+swUi();scUi();scRenderRows();swLoop();   // swarm + sensor designer; canvas draws only while Fleet tab is open
 connect();   // boot() runs after the hello/auth handshake
 </script></body></html>
 )rawliteral";
