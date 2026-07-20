@@ -1325,12 +1325,10 @@ void inputUpdate() {
 //  ToF10120 SENSOR + GESTURE STATE MACHINE
 // ============================================================
 #ifdef USES_TOF
-// ToF10120 I2C address. The datasheet quotes 0x52, but that is the 8-bit write
-// address; on Arduino Wire (7-bit) that device lives at 0x29. Modules and clones
-// vary, so initToF() probes both and uses whichever acknowledges. A wrong
-// address makes a fitted sensor look absent and never see a hand.
-uint8_t tofAddr = 0x29;
-static const uint8_t TOF_ADDR_CANDIDATES[] = { 0x29, 0x52 };
+// ToF10120 I2C address. The datasheet quotes 0xA4 (8-bit write address); on
+// Arduino Wire (7-bit) that is 0xA4 >> 1 = 0x52 (decimal 82). (0x29 is a
+// different part, the VL53L5CX, and is not used here.)
+uint8_t tofAddr = 0x52;
 
 // Window geometry (millimetres)
 #define WIN_START      250
@@ -1384,8 +1382,13 @@ bool waitingReentry = false;
 // big-endian millimetres. This matches the common ToF10120 distance register.
 int readToFRaw() {
   Wire.beginTransmission(tofAddr);
-  Wire.write((uint8_t)0x00);
+  Wire.write((uint8_t)0x00);          // point at the distance register
   if (Wire.endTransmission() != 0) return -1;
+  // The TOF10120 needs a moment to latch the reading before it can be read back
+  // (datasheet: at least 30us). Skipping this makes the read NACK, so a fitted
+  // sensor looks absent and never sees a hand. Match the reference driver's 1ms
+  // (delay() also yields to WiFi rather than busy-spinning).
+  delay(1);
   if (Wire.requestFrom(tofAddr, (uint8_t)2) != 2) return -1;
   int hi = Wire.read();
   int lo = Wire.read();
@@ -1400,17 +1403,6 @@ bool initToF() {
   // is generous.
   Wire.setTimeOut(5);
   delay(50);
-  // Probe each candidate: a bare address write acks only if a device is there.
-  tofAddr = 0;
-  for (uint8_t a : TOF_ADDR_CANDIDATES) {
-    Wire.beginTransmission(a);
-    if (Wire.endTransmission() == 0) { tofAddr = a; break; }
-  }
-  if (!tofAddr) {
-    tofAddr = 0x29;   // restore a sane default for later hot-plug attempts
-    Serial.println("[tof] init FAULT (no device acked on I2C)");
-    return false;
-  }
   int d = readToFRaw();
   bool ok = (d >= 0);
   Serial.printf("[tof] init %s addr=0x%02X (d=%d)\n", ok ? "OK" : "FAULT", tofAddr, d);
@@ -1650,7 +1642,7 @@ DNSServer        dns;
 #define DEF_AP_PASS "kinetic123"
 #define DEF_HOST    "sculpture"
 #define OTA_PASS    "kinetic"    // required by the IDE when uploading over WiFi
-#define FW_VERSION  "2.3.3"      // shown in the UI; bump on each release
+#define FW_VERSION  "2.3.4"      // shown in the UI; bump on each release
 // Pre-filled into the OTA box so a fresh board can self-update with one tap. The
 // CI workflow publishes firmware.bin to this rolling "latest" release on push.
 #define DEF_FW_URL  "https://github.com/knnurl/kinesthetic/releases/download/latest/firmware.bin"
