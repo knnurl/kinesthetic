@@ -1325,7 +1325,12 @@ void inputUpdate() {
 //  ToF10120 SENSOR + GESTURE STATE MACHINE
 // ============================================================
 #ifdef USES_TOF
-#define TOF_ADDR 0x52   // ToF10120 I2C address as given in spec
+// ToF10120 I2C address. The datasheet quotes 0x52, but that is the 8-bit write
+// address; on Arduino Wire (7-bit) that device lives at 0x29. Modules and clones
+// vary, so initToF() probes both and uses whichever acknowledges. A wrong
+// address makes a fitted sensor look absent and never see a hand.
+uint8_t tofAddr = 0x29;
+static const uint8_t TOF_ADDR_CANDIDATES[] = { 0x29, 0x52 };
 
 // Window geometry (millimetres)
 #define WIN_START      250
@@ -1378,10 +1383,10 @@ bool waitingReentry = false;
 // ASSUMPTION: ToF10120 read protocol is write register 0x00 then read 2 bytes,
 // big-endian millimetres. This matches the common ToF10120 distance register.
 int readToFRaw() {
-  Wire.beginTransmission(TOF_ADDR);
+  Wire.beginTransmission(tofAddr);
   Wire.write((uint8_t)0x00);
   if (Wire.endTransmission() != 0) return -1;
-  if (Wire.requestFrom(TOF_ADDR, 2) != 2) return -1;
+  if (Wire.requestFrom(tofAddr, (uint8_t)2) != 2) return -1;
   int hi = Wire.read();
   int lo = Wire.read();
   return (hi << 8) | lo;
@@ -1395,9 +1400,20 @@ bool initToF() {
   // is generous.
   Wire.setTimeOut(5);
   delay(50);
+  // Probe each candidate: a bare address write acks only if a device is there.
+  tofAddr = 0;
+  for (uint8_t a : TOF_ADDR_CANDIDATES) {
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() == 0) { tofAddr = a; break; }
+  }
+  if (!tofAddr) {
+    tofAddr = 0x29;   // restore a sane default for later hot-plug attempts
+    Serial.println("[tof] init FAULT (no device acked on I2C)");
+    return false;
+  }
   int d = readToFRaw();
   bool ok = (d >= 0);
-  Serial.printf("[tof] init %s (d=%d)\n", ok ? "OK" : "FAULT", d);
+  Serial.printf("[tof] init %s addr=0x%02X (d=%d)\n", ok ? "OK" : "FAULT", tofAddr, d);
   return ok;
 }
 
@@ -1634,7 +1650,7 @@ DNSServer        dns;
 #define DEF_AP_PASS "kinetic123"
 #define DEF_HOST    "sculpture"
 #define OTA_PASS    "kinetic"    // required by the IDE when uploading over WiFi
-#define FW_VERSION  "2.3.2"      // shown in the UI; bump on each release
+#define FW_VERSION  "2.3.3"      // shown in the UI; bump on each release
 // Pre-filled into the OTA box so a fresh board can self-update with one tap. The
 // CI workflow publishes firmware.bin to this rolling "latest" release on push.
 #define DEF_FW_URL  "https://github.com/knnurl/kinesthetic/releases/download/latest/firmware.bin"
@@ -2155,7 +2171,7 @@ void sendTelemetry() {
     "{\"type\":\"tele\",\"mode\":%u,\"enabled\":%s,\"speed\":%d,\"qi\":%d,\"gesture\":\"%s\","
     "\"derate\":%d,\"fault\":{\"tmc\":%s,\"otp\":%s,\"tof\":%s},\"sg\":%u,"
     "\"netmode\":\"%s\",\"netip\":\"%s\",\"sl\":%d,\"hand\":%d,"
-    "\"tof\":%d,\"heap\":%u,\"up\":%lu,"
+    "\"tof\":%d,\"tofp\":%d,\"ta\":%u,\"heap\":%u,\"up\":%lu,"
     "\"sw\":{\"on\":%d,\"cond\":%d,\"sync\":%d,\"x\":%.2f,\"y\":%.2f,\"pat\":%u,\"amp\":%.2f},"
     "\"sen\":{\"en\":%d,\"cue\":%d,\"g\":%.2f,\"blobs\":%u,\"mode\":%u},"
     "\"leds\":" LEDS_JSON "}",
@@ -2166,7 +2182,7 @@ void sendTelemetry() {
     faultOvertemp ? "true" : "false",
     faultTof ? "true" : "false",
     sgLoad, netMode.c_str(), netIp.c_str(), sliderPctForTele(), tofControl ? 1 : 0,
-    filtDist, (unsigned)ESP.getFreeHeap(), (unsigned long)(millis() / 1000),
+    filtDist, tofPresent ? 1 : 0, (unsigned)tofAddr, (unsigned)ESP.getFreeHeap(), (unsigned long)(millis() / 1000),
     (mode == MODE_SWARM) ? 1 : 0, swarmConductor ? 1 : 0,
     (swarmConductor || (swarmLastBeacon && millis() - swarmLastBeacon < SWARM_TIMEOUT_MS)) ? 1 : 0,
     swarmX, swarmY, swarmPatternId, swarmAmp,
@@ -2539,6 +2555,9 @@ void setup() {
 #ifdef USES_TOF
   bool tofOk = initToF();   // report OK or ABSENT
   tofPresent = tofOk;       // absent at boot is not a fault, just no gestures
+#ifndef INPUT_TOF_WIFI
+  tofControl = true;        // no web GUI in this build: the hand owns motion by default
+#endif
   faultTof = false;
   // No safe start restriction on ToF. Gesture system starts in IDLE.
   Serial.println("[boot] ToF build");

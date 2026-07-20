@@ -31,66 +31,66 @@ html,body{height:100%}
 body{background:var(--ink);color:var(--mist);font-family:system-ui,-apple-system,sans-serif;overflow-x:hidden}
 #moire{position:fixed;inset:0;width:100%;height:100%;display:block;z-index:0}
 .wrap{position:relative;z-index:1;max-width:440px;margin:0 auto;padding:24px 16px 44px}
-.title{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-weight:400;font-size:13px;letter-spacing:.55em;text-transform:uppercase;color:var(--mist);text-shadow:0 0 18px hsla(var(--h),90%,60%,.55);padding-left:.55em}
+.title{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-weight:400;font-size:14px;letter-spacing:.55em;text-transform:uppercase;color:var(--mist);text-shadow:0 0 18px hsla(var(--h),90%,60%,.55);padding-left:.55em}
 .pills{display:flex;flex-wrap:wrap;gap:6px;margin:11px 0 16px}
-.pill{font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;text-transform:uppercase;padding:4px 9px;border-radius:99px;border:1px solid var(--line);background:var(--glass);color:var(--dim);backdrop-filter:blur(8px)}
+.pill{font-family:ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:.12em;text-transform:uppercase;padding:4px 9px;border-radius:99px;border:1px solid var(--line);background:var(--glass);color:var(--dim);backdrop-filter:blur(8px)}
 .pill.ok{color:hsl(var(--h),80%,70%);border-color:hsla(var(--h),80%,60%,.35)}
 .pill.bad{color:#ff6b6b;border-color:rgba(255,107,107,.4)}
 .pill.warn{color:#f5b942;border-color:rgba(245,185,66,.4)}
 .tabs{display:flex;gap:4px;margin-bottom:14px;background:var(--glass);border:1px solid var(--line);border-radius:12px;padding:4px;backdrop-filter:blur(10px)}
-.tab{flex:1;text-align:center;font-family:ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);padding:9px 0;border-radius:9px;transition:.2s}
+.tab{flex:1;text-align:center;font-family:ui-monospace,Menlo,monospace;font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);padding:9px 0;border-radius:9px;transition:.2s}
 .tab.on{color:#fff;background:hsla(var(--h),80%,55%,.18);box-shadow:inset 0 0 16px hsla(var(--h),85%,60%,.14)}
 .card{background:var(--glass);border:1px solid var(--line);border-radius:18px;padding:16px;margin-bottom:12px;backdrop-filter:blur(16px) saturate(1.3);box-shadow:0 8px 40px rgba(0,0,0,.35)}
-label{font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
+label{font-family:ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
 .row{display:flex;gap:8px;align-items:center;justify-content:space-between}
 .hero{text-align:center;padding:24px 16px}
 .mname{font-family:ui-monospace,Menlo,monospace;font-size:30px;font-weight:600;letter-spacing:.22em;text-transform:uppercase;color:var(--mist);text-shadow:0 0 30px hsla(var(--h),90%,60%,.7);line-height:1}
-.mstate{font-family:ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim);margin-top:11px}
-.read{font-family:ui-monospace,Menlo,monospace;font-size:13px;color:hsl(var(--h),70%,72%);margin-top:6px;font-variant-numeric:tabular-nums}
-.val{font-family:ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums;color:var(--mist);font-size:13px}
+.mstate{font-family:ui-monospace,Menlo,monospace;font-size:12px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim);margin-top:11px}
+.read{font-family:ui-monospace,Menlo,monospace;font-size:14px;color:hsl(var(--h),70%,72%);margin-top:6px;font-variant-numeric:tabular-nums}
+.val{font-family:ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums;color:var(--mist);font-size:14px}
 input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;border-radius:3px;margin:16px 0 8px;background:linear-gradient(90deg,hsla(var(--h),70%,60%,.22),hsla(var(--h),70%,60%,.55) 50%,hsla(var(--h),70%,60%,.22))}
 input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;height:24px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#fff,hsl(var(--h),85%,60%));box-shadow:0 0 22px hsla(var(--h),90%,60%,.85),0 0 4px #fff;cursor:pointer}
 input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radius:50%;background:hsl(var(--h),85%,62%);box-shadow:0 0 22px hsla(var(--h),90%,60%,.85)}
 .ends{display:flex;justify-content:space-between}
-.ends span{font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim)}
+.ends span{font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim)}
 .stopbtn{border:1px solid var(--line);border-radius:99px;padding:4px 14px;color:var(--btntxt);background:var(--btn);cursor:pointer;margin-top:-3px;transition:.2s}
 .stopbtn:active{color:#fff;border-color:hsl(var(--h),85%,62%);box-shadow:0 0 14px hsla(var(--h),85%,55%,.4)}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
 .grid4{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
-.chip{font-family:ui-monospace,Menlo,monospace;font-size:12px;letter-spacing:.12em;text-transform:uppercase;border:1px solid var(--line);border-radius:12px;padding:13px 0;color:var(--btntxt);background:var(--btn);text-align:center;transition:.25s}
+.chip{font-family:ui-monospace,Menlo,monospace;font-size:13px;letter-spacing:.12em;text-transform:uppercase;border:1px solid var(--line);border-radius:12px;padding:13px 0;color:var(--btntxt);background:var(--btn);text-align:center;transition:.25s}
 .chip.on{color:#fff;border-color:hsl(var(--h),85%,62%);background:hsla(var(--h),80%,55%,.16);box-shadow:0 0 22px hsla(var(--h),85%,55%,.35),inset 0 0 18px hsla(var(--h),85%,60%,.12)}
-.power{width:100%;font-family:ui-monospace,Menlo,monospace;font-size:14px;letter-spacing:.2em;text-transform:uppercase;border:1px solid var(--line);border-radius:14px;padding:16px;color:var(--btntxt);background:var(--btn);transition:.25s}
+.power{width:100%;font-family:ui-monospace,Menlo,monospace;font-size:15px;letter-spacing:.2em;text-transform:uppercase;border:1px solid var(--line);border-radius:14px;padding:16px;color:var(--btntxt);background:var(--btn);transition:.25s}
 .power.on{color:#06121f;font-weight:700;border-color:hsl(var(--h),85%,62%);background:hsl(var(--h),85%,62%);box-shadow:0 0 36px hsla(var(--h),85%,55%,.6),inset 0 0 24px hsla(var(--h),85%,65%,.25)}
-.ti{width:100%;padding:11px;margin-top:4px;border-radius:10px;border:1px solid var(--line);background:var(--inputbg);color:var(--mist);font-size:14px;font-family:ui-monospace,Menlo,monospace}
+.ti{width:100%;padding:11px;margin-top:4px;border-radius:10px;border:1px solid var(--line);background:var(--inputbg);color:var(--mist);font-size:15px;font-family:ui-monospace,Menlo,monospace}
 .fr{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px}
 .fr .ti{width:96px;margin-top:0;text-align:right}
-.sub{color:var(--dim);font-size:12px;line-height:1.75}
-.nbtn{font-family:ui-monospace,Menlo,monospace;font-size:12px;letter-spacing:.1em;text-transform:uppercase;border:1px solid var(--line);border-radius:10px;padding:11px;color:var(--btntxt);background:var(--btn);text-align:center;cursor:pointer}
+.sub{color:var(--dim);font-size:13px;line-height:1.75}
+.nbtn{font-family:ui-monospace,Menlo,monospace;font-size:13px;letter-spacing:.1em;text-transform:uppercase;border:1px solid var(--line);border-radius:10px;padding:11px;color:var(--btntxt);background:var(--btn);text-align:center;cursor:pointer}
 .nbtn.on{color:#fff;border-color:hsl(var(--h),85%,62%);background:hsla(var(--h),80%,55%,.16)}
 .save{width:100%;margin-top:14px;font-family:ui-monospace,Menlo,monospace;letter-spacing:.15em;text-transform:uppercase;border:0;border-radius:12px;padding:13px;color:#06121f;font-weight:700;background:hsl(var(--h),85%,62%)}
 .save.ghost{background:transparent;color:hsl(var(--h),85%,62%);border:1px solid hsl(var(--h),85%,62%);font-weight:600}
 .qrow{display:flex;gap:8px;align-items:center;margin-top:8px}
-.qrow select,.qrow input{font-family:ui-monospace,Menlo,monospace;font-size:13px;padding:9px;border-radius:9px;border:1px solid var(--line);background:var(--inputbg);color:var(--mist)}
+.qrow select,.qrow input{font-family:ui-monospace,Menlo,monospace;font-size:14px;padding:9px;border-radius:9px;border:1px solid var(--line);background:var(--inputbg);color:var(--mist)}
 .qrow select option{background:var(--ink);color:var(--mist)}
 .qrow select{flex:1}
 .qrow input{width:74px;text-align:right}
 .qx{border:1px solid var(--line);background:rgba(255,80,80,.08);color:#ff8a8a;border-radius:9px;padding:9px 12px;font-family:ui-monospace,monospace}
-.addq{width:100%;margin-top:10px;border:1px dashed var(--line);background:transparent;color:var(--dim);border-radius:10px;padding:11px;font-family:ui-monospace,monospace;letter-spacing:.1em;text-transform:uppercase;font-size:11px}
+.addq{width:100%;margin-top:10px;border:1px dashed var(--line);background:transparent;color:var(--dim);border-radius:10px;padding:11px;font-family:ui-monospace,monospace;letter-spacing:.1em;text-transform:uppercase;font-size:12px}
 .sw{width:auto;flex:0 0 auto}
-.eyebrow{font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:hsl(var(--h),60%,68%);margin-bottom:4px;display:block}
+.eyebrow{font-family:ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:hsl(var(--h),60%,68%);margin-bottom:4px;display:block}
 .chip,.tab,.power,.nbtn,.qx,.addq,.save,.sw{cursor:pointer}
-.hbtn{width:24px;height:24px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;border-radius:50%;border:1px solid var(--line);background:var(--btn);color:var(--btntxt);font-family:ui-monospace,Menlo,monospace;font-size:12px;cursor:pointer;transition:.2s}
+.hbtn{width:24px;height:24px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;border-radius:50%;border:1px solid var(--line);background:var(--btn);color:var(--btntxt);font-family:ui-monospace,Menlo,monospace;font-size:13px;cursor:pointer;transition:.2s}
 .hbtn:hover,.hbtn:active{color:#fff;border-color:hsl(var(--h),85%,62%);box-shadow:0 0 14px hsla(var(--h),85%,55%,.4)}
 .mwrap{position:fixed;inset:0;z-index:9;display:flex;align-items:center;justify-content:center;padding:18px;background:var(--scrim);backdrop-filter:blur(8px)}
 .mcard{width:100%;max-width:420px;max-height:82vh;overflow:auto;background:var(--mcard);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 20px 70px rgba(0,0,0,.45)}
 .mrow{padding:11px 0;border-bottom:1px solid var(--line)}
 .mrow:last-child{border-bottom:0}
-.mrow b{font-family:ui-monospace,Menlo,monospace;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--mist);display:block;margin-bottom:3px}
+.mrow b{font-family:ui-monospace,Menlo,monospace;font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--mist);display:block;margin-bottom:3px}
 @media(prefers-reduced-motion:reduce){.chip,.power,.tab{transition:none}}
 </style></head><body>
 <canvas id="moire"></canvas>
 <div class="wrap">
-<div id="refreshBar" style="display:none;position:fixed;left:0;right:0;top:0;z-index:20;align-items:center;justify-content:center;gap:12px;padding:11px;background:hsl(var(--h),85%,62%);color:#06121f;font-family:ui-monospace,Menlo,monospace;font-size:13px;font-weight:700">
+<div id="refreshBar" style="display:none;position:fixed;left:0;right:0;top:0;z-index:20;align-items:center;justify-content:center;gap:12px;padding:11px;background:hsl(var(--h),85%,62%);color:#06121f;font-family:ui-monospace,Menlo,monospace;font-size:14px;font-weight:700">
  New firmware installed <button class="nbtn" style="color:#06121f;border-color:#06121f;background:transparent;padding:6px 12px" onclick="location.reload()">Refresh page</button></div>
 <div class="title">Kinesthetic</div>
 <div class="pills"><span id="conn" class="pill">offline</span>
@@ -220,7 +220,7 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
    <div class="chip" onclick="fleetSend({cmd:'enable',v:true});cmd({cmd:'enable',v:true})">Enable all</div>
    <div class="chip" onclick="fleetSend({cmd:'enable',v:false});cmd({cmd:'enable',v:false})">Stop all</div>
   </div>
-  <button class="save" style="margin-top:10px;white-space:nowrap;font-size:12px" onclick="fleetSyncNow()">Send mode + speed to all</button>
+  <button class="save" style="margin-top:10px;white-space:nowrap;font-size:13px" onclick="fleetSyncNow()">Send mode + speed to all</button>
   <div class="sub" id="fnote" style="margin-top:8px"></div>
  </div>
  <div class="card">
@@ -346,7 +346,7 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
   <div class="row"><span class="eyebrow" style="margin:0">Diagnostics</span><input id="dbgen" type="checkbox" class="sw" onchange="dbgbody.style.display=this.checked?'block':'none'"></div>
   <div id="dbgbody" style="display:none">
    <div class="sub" style="margin:8px 0 8px">Live values from this sculpture, for debugging.</div>
-   <pre id="dbg" style="font-family:ui-monospace,Menlo,monospace;font-size:12px;line-height:1.7;color:var(--dim);white-space:pre-wrap;word-break:break-word;margin:0">waiting for telemetry...</pre>
+   <pre id="dbg" style="font-family:ui-monospace,Menlo,monospace;font-size:13px;line-height:1.7;color:var(--dim);white-space:pre-wrap;word-break:break-word;margin:0">waiting for telemetry...</pre>
   </div>
  </div>
 </div>
@@ -476,10 +476,11 @@ function connect(){
     let a=Math.round(SWL.amp*100);if(Math.abs(+sp.value)!==a){sp.value=a;spShow(a);}}}
   else if(t.sl!==undefined&&!spDrag&&Date.now()-lastSpSent>1200&&document.activeElement!==sp&&+sp.value!==t.sl){sp.value=t.sl;spShow(t.sl);}
   // Overtemp is the only condition that actually endangers the motor -> red.
-  // TMC read-back loss and a dead ToF don't stop open-loop motion -> amber warn.
+  // TMC read-back loss never stops open-loop motion, so it is NOT shown here (it
+  // stays visible in the Help > Diagnostics panel). A present-but-dead ToF is a
+  // mild amber note.
   let f=t.fault||{};
   if(f.otp){flt.textContent='OVERTEMP '+t.derate+'%';flt.className='pill bad';}
-  else if(f.tmc){flt.textContent='driver telemetry off';flt.className='pill warn';}
   else if(f.tof){flt.textContent='ToF fault';flt.className='pill warn';}
   else{flt.textContent='health ok';flt.className='pill ok';}
   nip.textContent=t.netmode+' '+t.netip;
@@ -753,7 +754,8 @@ function dbgRender(t){let f=t.fault||{},sw=t.sw||{},sn=t.sen||{};
   'fw '+(fwver.textContent||'-')+'   uptime '+fmtUp(t.up),
   'mode '+(MODES[t.mode]||t.mode)+(t.hand?'  [HAND CONTROL]':'')+'   '+(t.enabled?'ENABLED':'standby'),
   'speed '+t.speed+' st/s   slider '+t.sl+'%',
-  'gesture '+t.gesture+'   tof '+(t.tof===undefined?'-':(t.tof>=2000?'no hand':t.tof+' mm')),
+  'control '+(t.hand?'HAND (ToF drives this sculpture)':'GUI / swarm  (double-tap sensor to take over)'),
+  'gesture '+t.gesture+'   tof '+(!t.tofp?'NOT CONNECTED':(t.tof>=2000?'no hand':t.tof+' mm'))+(t.ta?'  @0x'+(t.ta).toString(16):''),
   'health  tmc:'+(f.tmc?'read-fault':'ok')+'  otp:'+(f.otp?('WARN '+t.derate+'%'):'ok')+'  tof:'+(f.tof?'FAULT':'ok'),
   'stallguard '+t.sg+'   derate '+t.derate+'%',
   'swarm '+(sw.on?'ON':'off')+' / '+(sw.cond?'conductor':'follower')+(sw.on?(sw.sync?' / synced':' / NO CLOCK'):'')+'  pat'+sw.pat+' amp'+Math.round((sw.amp||0)*100)+'%  pos '+sw.x+','+sw.y,
