@@ -94,6 +94,7 @@ const int POT_PIN = 3;     // 10k pot wiper
 #endif
 
 #ifdef USES_TOF
+// ON PCB >> 3 | 1 | GND 
 const int SDA_PIN = 1;     // ToF10120 I2C data
 // GPIO2 unused on ToF versions
 const int SCL_PIN = 3;     // ToF10120 I2C clock
@@ -209,9 +210,13 @@ int  lastSliderPct = 0;           // exact percent last sent by the app; echoed 
 int  lastManualDir = 1;           // +1 or -1, inherited by BREATHE
 
 // Health / fault flags, surfaced to Serial, telemetry, and the response logic.
-bool     faultTmcComm  = false;   // TMC2209 UART not responding
+bool     faultTmcComm  = false;   // TMC2209 UART read-back not responding (motor still
+                                  // runs open-loop on STEP/DIR; this only means no telemetry)
 bool     faultOvertemp = false;   // TMC2209 overtemperature prewarning active
-bool     faultTof      = false;   // ToF sensor init or sustained read failure
+bool     faultTof      = false;   // a PRESENT ToF sensor died; never set when none is fitted
+bool     tofPresent    = false;   // a ToF ever answered, so its silence is a real fault
+bool     tofControl    = false;   // false = GUI/swarm owns motion; true = the hand (ToF) has
+                                  // seized this sculpture (a double tap latches it either way)
 uint16_t sgLoad        = 0;       // StallGuard load (informational)
 float    speedDerate   = 1.0f;    // health back-off multiplier on all motion
 bool     otaActive     = false;   // true while an OTA update is being written
@@ -844,10 +849,14 @@ void initTMC() {
   Serial1.begin(115200, SERIAL_8N1, UART_RX, UART_TX);
   driver.begin();
   applyDriverConfig();
-  uint32_t g = driver.GCONF();
-  uartOk = !(g == 0 || g == 0xFFFFFFFF);
+  // Liveness via the IOIN VERSION field (0x21 on a TMC2209): a known constant
+  // is a far more reliable read-back check than GCONF, which can legitimately
+  // read as small values. Retry a few times through boot noise.
+  uint8_t ver = 0;
+  for (int i = 0; i < 3 && ver != 0x21; i++) { ver = driver.version(); delay(2); }
+  uartOk = (ver == 0x21);
   faultTmcComm = !uartOk;
-  Serial.printf("[tmc] GCONF=0x%08X %s\n", g, uartOk ? "UART OK" : "UART FAULT");
+  Serial.printf("[tmc] version=0x%02X %s\n", ver, uartOk ? "UART OK" : "UART read-back FAULT (motor still runs open-loop)");
   // Do not hang on fault. Error flag is set for callers/telemetry.
 }
 
@@ -878,9 +887,8 @@ void pollHealth() {
   static uint8_t otpwCount = 0;
 
   switch (phase) {
-    case 0: {                      // GCONF: comm liveness
-      uint32_t g = driver.GCONF();
-      commBad = (g == 0 || g == 0xFFFFFFFF);
+    case 0: {                      // VERSION: comm read-back liveness
+      commBad = (driver.version() != 0x21);   // 0x21 = TMC2209 IOIN VERSION field
       if (commBad) { if (commBadCount < 255) commBadCount++; }
       else commBadCount = 0;
       faultTmcComm = (commBadCount >= COMM_CONFIRM);
@@ -1339,6 +1347,7 @@ void inputUpdate() {
 #define HOLD_IGNORE_MS  2000
 #define HOLD_MODE_MS    5000
 #define HOLD_ENABLE_MS 15000
+#define DOUBLETAP_MS    900   // max gap between the two brief taps of a control handoff
 
 // Window geometry must stay ordered or the gesture math silently misbehaves.
 static_assert(WIN_START < DB_LOW,  "window start must be below dead band low");
@@ -1407,7 +1416,7 @@ bool sampleToF() {
   // Dead sensor backoff: once faulted, probe at 1Hz instead of hammering a
   // dead bus at 30Hz. Recovers automatically when reads succeed again.
   static uint32_t tNextProbe = 0;
-  if (faultTof) {
+  if (faultTof || !tofPresent) {   // dead OR never-fitted: probe slowly, do not hammer I2C
     uint32_t now = millis();
     if (now < tNextProbe) return false;
     tNextProbe = now + 1000;
@@ -1415,8 +1424,8 @@ bool sampleToF() {
   int d = readToFRaw();
   static uint16_t failRun = 0;
   if (d < 0) { if (failRun < 0xFFFF) failRun++; }   // raw read failed
-  else failRun = 0;
-  faultTof = (failRun > 60);                         // ~2s of dead sensor at 30Hz
+  else { failRun = 0; tofPresent = true; }          // a good read: sensor is fitted (hot-plug ok)
+  faultTof = tofPresent && (failRun > 60);           // only a PRESENT sensor going silent is a fault
   if (d < 0 || d > NO_HAND_DIST) d = NO_HAND_DIST;   // no hand / out of range = far
   med[medIdx] = d;
   medIdx = (medIdx + 1) % 3;
@@ -1448,12 +1457,38 @@ int ceilingFromDist(int d) {
   return logSpeed(norm, FREQ_MAX);
 }
 
+// A double tap (two brief taps within DOUBLETAP_MS) hands motion control between
+// the web GUI/swarm and the physical hand, and latches until tapped again. On
+// seizing, the sculpture leaves the swarm and ignores remote drive commands so
+// the person at it always wins; releasing lets it rejoin / obey the GUI again.
+void fireControlToggle() {
+  tofControl = !tofControl;
+  if (tofControl) {
+    if (mode == MODE_SWARM) swarmSetActive(false);
+    swarmMuted = true;                 // beacons will not re-engage while the hand owns it
+    cancelQueue("hand control");
+  } else {
+    swarmMuted = false;                // released: rejoin the swarm / obey the GUI
+  }
+  Serial.printf("[gesture] control -> %s\n", tofControl ? "HAND (ToF)" : "GUI/swarm");
+}
+
+uint32_t tLastTap = 0;
+void noteTap(uint32_t now) {
+  if (tLastTap && now - tLastTap < DOUBLETAP_MS) { fireControlToggle(); tLastTap = 0; }
+  else tLastTap = now;
+}
+
+// Mode and enable holds only drive the motor while the hand owns control. The
+// grab (double tap) and the >15s network reset are always live.
 void fireModeChange() {
+  if (!tofControl) return;
   userSelectMode((mode + 1) % (MODE_COUNT - 1));   // cycle the real modes; SWARM is not in the rotation
   Serial.printf("[gesture] mode change -> %u\n", mode);
 }
 
 void fireEnableToggle() {
+  if (!tofControl) return;
   motorEnabled = !motorEnabled;
   Serial.printf("[gesture] enable toggle -> %s\n", motorEnabled ? "ON" : "OFF");
 }
@@ -1477,10 +1512,11 @@ void fireNetworkReset() {
 
 void applySpeedControl() {
   // Live mapping while in SPEED_CONTROL, mode dependent.
-  // In SWARM the choreography owns the speed: a brief hand pass must not yank
-  // the ceiling. The hand becomes a ripple source instead (swarmGesturePing);
-  // the longer hold gestures (mode change, enable, reset) still work.
-  if (mode == MODE_SWARM) return;
+  // The hand drives the motor only when it owns control (grabbed via double tap).
+  // Otherwise the GUI/swarm owns it; in SWARM the hand is a ripple source instead
+  // (swarmGesturePing), and the double tap + >15s reset gestures are still live.
+  if (!tofControl) return;
+  if (mode == MODE_SWARM) return;   // defensive: a grab already broke it out of swarm
   if (mode == MANUAL) {
     int s = manualSpeedFromDist(filtDist);
     manualSpeed = s;
@@ -1532,8 +1568,8 @@ void gestureTick() {
 #ifdef INPUT_TOF_WIFI
         swarmGesturePing();               // in swarm: this hand becomes a ripple source
 #endif
-        // Auto enable if disabled, then control speed.
-        if (!motorEnabled) {
+        // Auto enable only when the hand owns control (a double tap grabbed it).
+        if (tofControl && !motorEnabled) {
           motorEnabled = true;
           Serial.println("[gesture] auto-enable on speed control");
         }
@@ -1542,7 +1578,7 @@ void gestureTick() {
       if (d > GESTURE_EXIT) {             // hand left while still
         uint32_t held = now - tEnter;
         if (held < HOLD_IGNORE_MS) {
-          // ignored, accidental
+          noteTap(now);                   // brief tap: half of a control-handoff double tap
         } else if (held <= HOLD_MODE_MS) {
           fireModeChange();
         } else if (held <= HOLD_ENABLE_MS) {
@@ -1598,7 +1634,7 @@ DNSServer        dns;
 #define DEF_AP_PASS "kinetic123"
 #define DEF_HOST    "sculpture"
 #define OTA_PASS    "kinetic"    // required by the IDE when uploading over WiFi
-#define FW_VERSION  "2.3.0"      // shown in the UI; bump on each release
+#define FW_VERSION  "2.3.2"      // shown in the UI; bump on each release
 // Pre-filled into the OTA box so a fresh board can self-update with one tap. The
 // CI workflow publishes firmware.bin to this rolling "latest" release on push.
 #define DEF_FW_URL  "https://github.com/knnurl/kinesthetic/releases/download/latest/firmware.bin"
@@ -1822,6 +1858,7 @@ void swarmNetTask() {
 
   if (type == 1 && len >= (int)sizeof(SwarmBeacon)) {
     if (swarmConductor) return;              // our own broadcast, looped back
+    if (tofControl) return;                  // hand owns this sculpture: ignore the swarm
     SwarmBeacon *b = (SwarmBeacon *)buf;
     uint32_t now = millis();
     // Clock sync: snap on the first beacon from a (re)appearing conductor,
@@ -1928,6 +1965,11 @@ void onWsEvent(uint8_t n, WStype_t type, uint8_t *payload, size_t len) {
     Serial.printf("[auth] interface password %s\n", np.length() ? "set" : "cleared");
     return;
   }
+
+  // While the hand owns this sculpture (double-tapped into ToF control), remote
+  // drive commands from the GUI/fleet are ignored so the person at it always wins.
+  bool driveCmd = !strcmp(c, "mode") || !strcmp(c, "enable") || !strcmp(c, "speed");
+  if (tofControl && driveCmd) { ws.sendTXT(n, "{\"type\":\"handlock\"}"); return; }
 
   // Last command wins. App speed overrides the ToF ceiling until the next ToF gesture.
   if (!strcmp(c, "mode")) {
@@ -2059,6 +2101,7 @@ void onWsEvent(uint8_t n, WStype_t type, uint8_t *payload, size_t len) {
                   scfg.mode, scfg.dst[0], scfg.dst[1], scfg.dst[2]);
   } else if (!strcmp(c, "swarm")) {
     // Choreography lives on the conductor; the UDP beacon fans it out.
+    if (tofControl) { ws.sendTXT(n, "{\"type\":\"handlock\"}"); return; }   // hand owns this device
     if (!swarmConductor) { ws.sendTXT(n, "{\"type\":\"err\",\"m\":\"not conductor\"}"); return; }
     swarmPatternId = (uint8_t)constrain((int)(d["pat"] | (int)swarmPatternId), 0, SWARM_PATTERNS - 1);
     swarmAmp  = constrain((float)(d["amp"] | swarmAmp), 0.0f, 1.0f);
@@ -2107,11 +2150,12 @@ void sendTelemetry() {
     queueOffPending = false;
     wsSendAll("{\"type\":\"queueoff\"}");
   }
-  char buf[576];   // grown for the swarm + sensor blocks; snprintf truncates silently if undersized
+  char buf[640];   // grown for the swarm + sensor + diagnostics fields; snprintf truncates silently if undersized
   snprintf(buf, sizeof(buf),
     "{\"type\":\"tele\",\"mode\":%u,\"enabled\":%s,\"speed\":%d,\"qi\":%d,\"gesture\":\"%s\","
     "\"derate\":%d,\"fault\":{\"tmc\":%s,\"otp\":%s,\"tof\":%s},\"sg\":%u,"
-    "\"netmode\":\"%s\",\"netip\":\"%s\",\"sl\":%d,"
+    "\"netmode\":\"%s\",\"netip\":\"%s\",\"sl\":%d,\"hand\":%d,"
+    "\"tof\":%d,\"heap\":%u,\"up\":%lu,"
     "\"sw\":{\"on\":%d,\"cond\":%d,\"sync\":%d,\"x\":%.2f,\"y\":%.2f,\"pat\":%u,\"amp\":%.2f},"
     "\"sen\":{\"en\":%d,\"cue\":%d,\"g\":%.2f,\"blobs\":%u,\"mode\":%u},"
     "\"leds\":" LEDS_JSON "}",
@@ -2121,7 +2165,8 @@ void sendTelemetry() {
     faultTmcComm ? "true" : "false",
     faultOvertemp ? "true" : "false",
     faultTof ? "true" : "false",
-    sgLoad, netMode.c_str(), netIp.c_str(), sliderPctForTele(),
+    sgLoad, netMode.c_str(), netIp.c_str(), sliderPctForTele(), tofControl ? 1 : 0,
+    filtDist, (unsigned)ESP.getFreeHeap(), (unsigned long)(millis() / 1000),
     (mode == MODE_SWARM) ? 1 : 0, swarmConductor ? 1 : 0,
     (swarmConductor || (swarmLastBeacon && millis() - swarmLastBeacon < SWARM_TIMEOUT_MS)) ? 1 : 0,
     swarmX, swarmY, swarmPatternId, swarmAmp,
@@ -2492,8 +2537,9 @@ void setup() {
 #endif
 
 #ifdef USES_TOF
-  bool tofOk = initToF();   // report OK or FAULT
-  faultTof = !tofOk;
+  bool tofOk = initToF();   // report OK or ABSENT
+  tofPresent = tofOk;       // absent at boot is not a fault, just no gestures
+  faultTof = false;
   // No safe start restriction on ToF. Gesture system starts in IDLE.
   Serial.println("[boot] ToF build");
 #endif

@@ -36,6 +36,7 @@ body{background:var(--ink);color:var(--mist);font-family:system-ui,-apple-system
 .pill{font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;text-transform:uppercase;padding:4px 9px;border-radius:99px;border:1px solid var(--line);background:var(--glass);color:var(--dim);backdrop-filter:blur(8px)}
 .pill.ok{color:hsl(var(--h),80%,70%);border-color:hsla(var(--h),80%,60%,.35)}
 .pill.bad{color:#ff6b6b;border-color:rgba(255,107,107,.4)}
+.pill.warn{color:#f5b942;border-color:rgba(245,185,66,.4)}
 .tabs{display:flex;gap:4px;margin-bottom:14px;background:var(--glass);border:1px solid var(--line);border-radius:12px;padding:4px;backdrop-filter:blur(10px)}
 .tab{flex:1;text-align:center;font-family:ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);padding:9px 0;border-radius:9px;transition:.2s}
 .tab.on{color:#fff;background:hsla(var(--h),80%,55%,.18);box-shadow:inset 0 0 16px hsla(var(--h),85%,60%,.14)}
@@ -89,9 +90,12 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
 </style></head><body>
 <canvas id="moire"></canvas>
 <div class="wrap">
+<div id="refreshBar" style="display:none;position:fixed;left:0;right:0;top:0;z-index:20;align-items:center;justify-content:center;gap:12px;padding:11px;background:hsl(var(--h),85%,62%);color:#06121f;font-family:ui-monospace,Menlo,monospace;font-size:13px;font-weight:700">
+ New firmware installed <button class="nbtn" style="color:#06121f;border-color:#06121f;background:transparent;padding:6px 12px" onclick="location.reload()">Refresh page</button></div>
 <div class="title">Kinesthetic</div>
 <div class="pills"><span id="conn" class="pill">offline</span>
 <span id="gs" class="pill" style="display:none">idle</span>
+<span id="hnd" class="pill warn" style="display:none">hand control</span>
 <span id="flt" class="pill">health ok</span>
 <span id="nip" class="pill">net</span></div>
 
@@ -338,6 +342,13 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
   <label style="display:block;margin:14px 0 6px">Reaching the interface</label>
   <div class="sub">Access point: join the sculpture's wifi, the page opens automatically.<br>Joined to your network: open the hostname above with .local, or the address in the network pill.</div>
  </div>
+ <div class="card">
+  <div class="row"><span class="eyebrow" style="margin:0">Diagnostics</span><input id="dbgen" type="checkbox" class="sw" onchange="dbgbody.style.display=this.checked?'block':'none'"></div>
+  <div id="dbgbody" style="display:none">
+   <div class="sub" style="margin:8px 0 8px">Live values from this sculpture, for debugging.</div>
+   <pre id="dbg" style="font-family:ui-monospace,Menlo,monospace;font-size:12px;line-height:1.7;color:var(--dim);white-space:pre-wrap;word-break:break-word;margin:0">waiting for telemetry...</pre>
+  </div>
+ </div>
 </div>
 </div>
 
@@ -387,7 +398,7 @@ const MODES=['MANUAL','BREATHE','SWEEP','WANDER','TIDE','PENDULUM','HEARTBEAT','
 // variable, so opening the Motion tab clobbered any commands queued while offline.
 let w,en=false,staMode=false,Q=[],MQ=[],qi=-1,St={speed:0,mode:0,en:false};
 let LM=2,ledLoaded=false,ledSeen=false;
-let TK='',PW=localStorage.ks_pw||'',booted=false,spDrag=false,lastLedSent=0,lastMotionSave=0,lastSpSent=0;
+let TK='',PW=localStorage.ks_pw||'',booted=false,spDrag=false,lastLedSent=0,lastMotionSave=0,lastSpSent=0,fwSeen='';
 function api(u){return fetch(u+(TK?'?t='+TK:''))}
 function ledMode(m){LM=m;for(let i=0;i<5;i++)document.getElementById('l'+i).className='chip'+(i==m?' on':'');ledSend();}
 function ledSend(){lastLedSent=Date.now();const o={cmd:'led',m:LM,hue:+lhue.value,bri:+lbri.value,rt:+lrt.value};cmd(o);if(fmir.checked)fleetSend(o);}
@@ -425,7 +436,10 @@ function connect(){
  w.onerror=()=>{try{w.close();}catch(e){}};  // mobile sockets half-die; force a clean reconnect
  w.onmessage=e=>{const t=JSON.parse(e.data);
   if(t.type=='hello'){
-   if(t.fw)fwver.textContent=t.fw;
+   if(t.fw){fwver.textContent=t.fw;
+    // Firmware version changed under us (OTA finished + rebooted): the running
+    // page is now stale, so prompt a reload to fetch the new UI.
+    if(fwSeen&&fwSeen!==t.fw)refreshBar.style.display='flex';fwSeen=t.fw;}
    if(t.host)SELFH=t.host;
    if(t.auth){if(PW){w.send(JSON.stringify({cmd:'auth',pw:PW}));}else{lock.style.display='flex';}}
    else{TK=t.tok||'';lock.style.display='none';boot();}
@@ -461,10 +475,16 @@ function connect(){
    if(SWL&&!spDrag&&Date.now()-lastSpSent>1200&&document.activeElement!==sp){
     let a=Math.round(SWL.amp*100);if(Math.abs(+sp.value)!==a){sp.value=a;spShow(a);}}}
   else if(t.sl!==undefined&&!spDrag&&Date.now()-lastSpSent>1200&&document.activeElement!==sp&&+sp.value!==t.sl){sp.value=t.sl;spShow(t.sl);}
-  let f=t.fault||{};let bad=f.tmc||f.otp||f.tof;
-  flt.textContent=f.tmc?'TMC comm':f.otp?('OVERTEMP '+t.derate+'%'):f.tof?'ToF fault':'health ok';
-  flt.className=bad?'pill bad':'pill ok';
+  // Overtemp is the only condition that actually endangers the motor -> red.
+  // TMC read-back loss and a dead ToF don't stop open-loop motion -> amber warn.
+  let f=t.fault||{};
+  if(f.otp){flt.textContent='OVERTEMP '+t.derate+'%';flt.className='pill bad';}
+  else if(f.tmc){flt.textContent='driver telemetry off';flt.className='pill warn';}
+  else if(f.tof){flt.textContent='ToF fault';flt.className='pill warn';}
+  else{flt.textContent='health ok';flt.className='pill ok';}
   nip.textContent=t.netmode+' '+t.netip;
+  hnd.style.display=t.hand?'':'none';   // this sculpture is under physical (ToF) control
+  if(dbgen.checked)dbgRender(t);
   if(reduce)draw();
  };
 }
@@ -726,6 +746,20 @@ function loadNet(){api('/net').then(r=>r.json()).then(j=>{
  ip.value=j.ip;gw.value=j.gw;mask.value=j.mask;us.checked=j.static;updS();setSta(j.sta);
  fwver.textContent=j.fwver||'-';fwurl.value=j.fwurl||'';
  note.textContent='Now: '+j.mode+' '+j.cur;});}
+function fmtUp(s){s=s||0;let h=Math.floor(s/3600),m=Math.floor(s%3600/60),ss=s%60;return (h?h+'h ':'')+((h||m)?m+'m ':'')+ss+'s';}
+// Live diagnostics dump for the Help tab (only rendered while the panel is open).
+function dbgRender(t){let f=t.fault||{},sw=t.sw||{},sn=t.sen||{};
+ dbg.textContent=[
+  'fw '+(fwver.textContent||'-')+'   uptime '+fmtUp(t.up),
+  'mode '+(MODES[t.mode]||t.mode)+(t.hand?'  [HAND CONTROL]':'')+'   '+(t.enabled?'ENABLED':'standby'),
+  'speed '+t.speed+' st/s   slider '+t.sl+'%',
+  'gesture '+t.gesture+'   tof '+(t.tof===undefined?'-':(t.tof>=2000?'no hand':t.tof+' mm')),
+  'health  tmc:'+(f.tmc?'read-fault':'ok')+'  otp:'+(f.otp?('WARN '+t.derate+'%'):'ok')+'  tof:'+(f.tof?'FAULT':'ok'),
+  'stallguard '+t.sg+'   derate '+t.derate+'%',
+  'swarm '+(sw.on?'ON':'off')+' / '+(sw.cond?'conductor':'follower')+(sw.on?(sw.sync?' / synced':' / NO CLOCK'):'')+'  pat'+sw.pat+' amp'+Math.round((sw.amp||0)*100)+'%  pos '+sw.x+','+sw.y,
+  'sensor '+(sn.en?'on':'off')+'  cue:'+(sn.cue?'live':'idle')+'  gain'+Math.round((sn.g||0)*100)+'%  blobs'+sn.blobs+'  mode'+sn.mode,
+  'net '+t.netmode+' '+t.netip+'   free heap '+Math.round((t.heap||0)/1024)+' kB'
+ ].join('\n');}
 function doUpdate(){if(!fwurl.value){fwnote.textContent='Enter a .bin URL first';return;}fwnote.textContent='Starting...';cmd({cmd:'fwupdate',url:fwurl.value});}
 // Tell every connected fleet sculpture (and this one) to pull the same .bin.
 // Peers first so this page stays alive to report, then this device last.
