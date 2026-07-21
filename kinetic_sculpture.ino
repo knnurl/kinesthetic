@@ -1345,7 +1345,7 @@ uint8_t tofAddr = 0x52;
 #define REENTRY_HYST    50   // must drop 50mm below exit to re-enter
 #define STILL_TOL       50   // +-5cm: within this a hold counts as "still"; more = speed
 #define NO_HAND_DIST  2000   // sentinel: invalid or beyond usable band = no hand (far)
-#define EMA_ALPHA     0.4f   // distance smoothing, 1.0 = no smoothing, lower = calmer
+#define EMA_ALPHA     0.25f  // distance smoothing, 1.0 = no smoothing, lower = calmer
 // tofMaxDist (runtime, GUI-settable full-speed distance) is the band ceiling; the
 // hand is treated as leaving beyond it + these margins. Runtime, so no longer a
 // compile-time constant.
@@ -1378,8 +1378,9 @@ enum GState : uint8_t { G_IDLE = 0, G_ACQUIRING, G_EVALUATING, G_SPEED };
 GState gstate = G_IDLE;
 
 int  filtDist = NO_HAND_DIST;  // latest filtered reading (mm)
-int  med[3] = {NO_HAND_DIST, NO_HAND_DIST, NO_HAND_DIST};
+int  med[5] = {NO_HAND_DIST, NO_HAND_DIST, NO_HAND_DIST, NO_HAND_DIST, NO_HAND_DIST};
 uint8_t medIdx = 0;
+bool tofLatchDisable = false;   // sticky: once close-to-disable fires, stay off until the hand leaves
 float emaDist = NO_HAND_DIST;  // exponential moving average of the median
 bool  emaInit = false;
 
@@ -1421,11 +1422,11 @@ bool initToF() {
   return ok;
 }
 
-int median3(int a, int b, int c) {
-  if (a > b) { int t = a; a = b; b = t; }
-  if (b > c) { int t = b; b = c; c = t; }
-  if (a > b) { int t = a; a = b; b = t; }
-  return b;
+// Median of the 5-sample window (insertion sort of a copy; window is tiny).
+int median5() {
+  int s[5]; for (int i = 0; i < 5; i++) s[i] = med[i];
+  for (int i = 1; i < 5; i++) { int k = s[i], j = i - 1; while (j >= 0 && s[j] > k) { s[j + 1] = s[j]; j--; } s[j + 1] = k; }
+  return s[2];
 }
 
 // Read one sample. Invalid or out of range is mapped to a far sentinel (NOT
@@ -1448,9 +1449,9 @@ bool sampleToF() {
   faultTof = tofPresent && (failRun > 60);           // only a PRESENT sensor going silent is a fault
   if (d < 0 || d > NO_HAND_DIST) d = NO_HAND_DIST;   // invalid / far beyond reach = no hand
   else if (d < WIN_START) d = WIN_START;             // clamp very near readings up to 200mm
-  med[medIdx] = d;                                    // (the far/speed cap at 1000 is in the ramp)
-  medIdx = (medIdx + 1) % 3;
-  int m = median3(med[0], med[1], med[2]);
+  med[medIdx] = d;                                    // (the far/speed cap is in the ramp)
+  medIdx = (medIdx + 1) % 5;
+  int m = median5();                                  // 5-wide median rejects up to 2 spikes
   if (!emaInit) { emaDist = m; emaInit = true; }
   else          { emaDist += EMA_ALPHA * (m - emaDist); }
   filtDist = (int)(emaDist + 0.5f);
@@ -1542,13 +1543,16 @@ void applySpeedControl() {
   // a 3-8s hold seizes it (which breaks it out to MANUAL, so it lands here).
   if (mode == MODE_SWARM) return;
   int d = filtDist;
-  // Close = stop: at/below the disable boundary, cut the motor (hysteresis keeps
-  // it off until the hand lifts back above the re-enable point).
+  // Close = stop, and LATCH it: once the hand comes within the disable boundary
+  // the motor stays off (speed 0) until the hand fully leaves and returns. This
+  // stops a withdrawal from the close zone ramping the motor up through the band.
   if (d <= SPEED_MIN_DIST) {
     motorEnabled = false;
-    if (mode == MANUAL) manualSpeed = 0;
+    tofLatchDisable = true;
+    if (mode == MANUAL) manualSpeed = 0; else maxSpeedCeiling = 0;
     return;
   }
+  if (tofLatchDisable) return;                        // held off until the hand leaves (reset on re-acquire)
   // In the speed band: enable first if the motor was off, then map distance.
   if (!motorEnabled && d >= SPEED_REENABLE) motorEnabled = true;
   if (mode == MANUAL) {
@@ -1580,6 +1584,7 @@ void gestureTick() {
         acqRef = d;
         tEnter = now;
         tStableStart = now;
+        tofLatchDisable = false;   // fresh hand session: clear any sticky disable
         gstate = G_ACQUIRING;
       }
       break;
@@ -1660,7 +1665,7 @@ DNSServer        dns;
 #define DEF_AP_PASS "kinetic123"
 #define DEF_HOST    "sculpture"
 #define OTA_PASS    "kinetic"    // required by the IDE when uploading over WiFi
-#define FW_VERSION  "2.4.2"      // shown in the UI; bump on each release
+#define FW_VERSION  "2.4.3"      // shown in the UI; bump on each release
 // Pre-filled into the OTA box so a fresh board can self-update with one tap. The
 // CI workflow publishes firmware.bin to this rolling "latest" release on push.
 #define DEF_FW_URL  "https://github.com/knnurl/kinesthetic/releases/download/latest/firmware.bin"
@@ -2170,6 +2175,14 @@ void onWsEvent(uint8_t n, WStype_t type, uint8_t *payload, size_t len) {
 // the slider on every release. The inverse map is kept only for ceilings set by
 // gesture or pot, where no exact percent exists.
 int sliderPctForTele() {
+  // MANUAL: reflect the live signed speed so the GUI slider tracks the hand (and
+  // vice versa: the slider still commands manualSpeed). They share one value.
+  if (mode == MANUAL) {
+    if (manualSpeed == 0) return 0;
+    int mag = (int)map(constrain(abs(manualSpeed), MANUAL_MIN_MOVE, FREQ_MAX),
+                       MANUAL_MIN_MOVE, FREQ_MAX, 1, 100);
+    return manualSpeed > 0 ? mag : -mag;
+  }
   if (maxSpeedCeiling <= 0) return 0;
   if (lastSliderPct != 0 &&
       map(abs(lastSliderPct), 1, 100, MANUAL_MIN_MOVE, FREQ_MAX) == maxSpeedCeiling)
