@@ -1343,9 +1343,9 @@ uint8_t tofAddr = 0x52;
 #define SPEED_MIN_DIST 240   // at/below this the motor is disabled (24cm)
 #define SPEED_REENABLE 270   // must lift back above this to re-enable (hysteresis)
 #define REENTRY_HYST    50   // must drop 50mm below exit to re-enter
-#define STILL_TOL       50   // +-5cm: within this a hold counts as "still"; more = speed
+#define STILL_TOL       60   // +-6cm: within this a hold counts as "still"; more = speed control
 #define NO_HAND_DIST  2000   // sentinel: invalid or beyond usable band = no hand (far)
-#define EMA_ALPHA     0.25f  // distance smoothing, 1.0 = no smoothing, lower = calmer
+#define EMA_ALPHA     0.4f   // distance smoothing, 1.0 = no smoothing, lower = calmer
 // tofMaxDist (runtime, GUI-settable full-speed distance) is the band ceiling; the
 // hand is treated as leaving beyond it + these margins. Runtime, so no longer a
 // compile-time constant.
@@ -1377,8 +1377,9 @@ static_assert(HOLD_TAP_MS < HOLD_MODE_MS && HOLD_MODE_MS < HOLD_HANDOFF_MS && HO
 enum GState : uint8_t { G_IDLE = 0, G_ACQUIRING, G_EVALUATING, G_SPEED };
 GState gstate = G_IDLE;
 
-int  filtDist = NO_HAND_DIST;  // latest filtered reading (mm)
-int  med[5] = {NO_HAND_DIST, NO_HAND_DIST, NO_HAND_DIST, NO_HAND_DIST, NO_HAND_DIST};
+int  filtDist = NO_HAND_DIST;  // smoothed in-reach distance (mm); HOLDS its value when the hand is gone
+bool handPresent = false;      // debounced presence, decided on the RAW read (fast edge, no smoothing lag)
+int  med[3] = {NO_HAND_DIST, NO_HAND_DIST, NO_HAND_DIST};
 uint8_t medIdx = 0;
 bool tofLatchDisable = false;   // sticky: once close-to-disable fires, stay off until the hand leaves
 float emaDist = NO_HAND_DIST;  // exponential moving average of the median
@@ -1422,40 +1423,50 @@ bool initToF() {
   return ok;
 }
 
-// Median of the 5-sample window (insertion sort of a copy; window is tiny).
-int median5() {
-  int s[5]; for (int i = 0; i < 5; i++) s[i] = med[i];
-  for (int i = 1; i < 5; i++) { int k = s[i], j = i - 1; while (j >= 0 && s[j] > k) { s[j + 1] = s[j]; j--; } s[j + 1] = k; }
-  return s[2];
+int median3(int a, int b, int c) {
+  if (a > b) { int t = a; a = b; b = t; }
+  if (b > c) { int t = b; b = c; c = t; }
+  if (a > b) { int t = a; a = b; b = t; }
+  return b;
 }
 
-// Read one sample. Invalid or out of range is mapped to a far sentinel (NOT
-// discarded, which previously froze filtDist and stalled gesture exit). A
-// 3 sample median rejects single spikes and an EMA calms residual jitter.
-// Cadence is owned by the scheduler, so there is no internal time gate here.
+// Read + condition one sample. Presence is decided on the RAW value (a fast edge,
+// no smoothing lag) and debounced. filtDist is smoothed from IN-REACH reads only
+// and HOLDS its last value while the hand is gone, so removing the hand freezes
+// the speed where it was instead of the smoothed value climbing through the band.
 bool sampleToF() {
-  // Dead sensor backoff: once faulted, probe at 1Hz instead of hammering a
-  // dead bus at 30Hz. Recovers automatically when reads succeed again.
   static uint32_t tNextProbe = 0;
-  if (faultTof || !tofPresent) {   // dead OR never-fitted: probe slowly, do not hammer I2C
+  if (faultTof || !tofPresent) {   // dead OR never-fitted: probe at 1Hz, do not hammer I2C
     uint32_t now = millis();
     if (now < tNextProbe) return false;
     tNextProbe = now + 1000;
   }
-  int d = readToFRaw();
+  int raw = readToFRaw();
   static uint16_t failRun = 0;
-  if (d < 0) { if (failRun < 0xFFFF) failRun++; }   // raw read failed
-  else { failRun = 0; tofPresent = true; }          // a good read: sensor is fitted (hot-plug ok)
-  faultTof = tofPresent && (failRun > 60);           // only a PRESENT sensor going silent is a fault
-  if (d < 0 || d > NO_HAND_DIST) d = NO_HAND_DIST;   // invalid / far beyond reach = no hand
-  else if (d < WIN_START) d = WIN_START;             // clamp very near readings up to 200mm
-  med[medIdx] = d;                                    // (the far/speed cap is in the ramp)
-  medIdx = (medIdx + 1) % 5;
-  int m = median5();                                  // 5-wide median rejects up to 2 spikes
-  if (!emaInit) { emaDist = m; emaInit = true; }
-  else          { emaDist += EMA_ALPHA * (m - emaDist); }
-  filtDist = (int)(emaDist + 0.5f);
-  return true;
+  if (raw < 0) { if (failRun < 0xFFFF) failRun++; }
+  else { failRun = 0; tofPresent = true; }
+  faultTof = tofPresent && (failRun > 60);
+
+  // In reach = a valid read within the band plus a small margin. Debounce the
+  // "gone" edge (3 reads ~100ms) to ride out single dropouts.
+  bool inReach = (raw > 0 && raw <= tofMaxDist + 200);
+  static uint8_t goneCount = 0;
+  if (inReach) goneCount = 0; else if (goneCount < 255) goneCount++;
+  handPresent = (goneCount < 3);
+
+  if (inReach) {
+    int d = raw < WIN_START ? WIN_START : raw;   // clamp very-near up to 200mm
+    if (!emaInit) {                              // fresh presence: snap (no lag, no stale baseline)
+      med[0] = med[1] = med[2] = d; medIdx = 0; emaDist = d; emaInit = true;
+    } else {
+      med[medIdx] = d; medIdx = (medIdx + 1) % 3;
+      emaDist += EMA_ALPHA * (median3(med[0], med[1], med[2]) - emaDist);
+    }
+    filtDist = (int)(emaDist + 0.5f);
+  } else if (!handPresent) {
+    emaInit = false;                             // arm a clean snap for the next hand
+  }
+  return true;                                   // filtDist holds its last value while gone
 }
 
 // Distance -> unsigned speed magnitude on a single ramp: SPEED_MIN_DIST..WIN_END
@@ -1572,48 +1583,31 @@ void gestureTick() {
   switch (gstate) {
 
     case G_IDLE:
-      if (d <= GESTURE_EXIT) {
-        // Re-entry shortcut: resume speed control if we exited it recently.
-        if (waitingReentry && (now - tExitSpeed) <= 1000 && d <= (SPEED_EXIT - REENTRY_HYST)) {
-          gstate = G_SPEED;
-          waitingReentry = false;
-          break;
-        }
+      if (handPresent) {
+        // Re-entry shortcut: resume speed control if we left it a moment ago.
+        if (waitingReentry && (now - tExitSpeed) <= 1000) { waitingReentry = false; gstate = G_SPEED; break; }
         waitingReentry = false;
-        entryDist = d;
-        acqRef = d;
+        entryDist = d;                    // filtDist was just snapped, so this baseline is clean
         tEnter = now;
-        tStableStart = now;
-        tofLatchDisable = false;   // fresh hand session: clear any sticky disable
-        gstate = G_ACQUIRING;
-      }
-      break;
-
-    case G_ACQUIRING:
-      if (d > GESTURE_EXIT) { gstate = G_IDLE; break; }
-      if (abs(d - acqRef) > 15) {        // not stable, restart the 200ms window
-        acqRef = d;
-        tStableStart = now;
-      } else if (now - tStableStart >= 200) {
-        entryDist = d;                    // lock entry distance
+        tofLatchDisable = false;          // fresh hand session: clear any sticky disable
         gstate = G_EVALUATING;
       }
       break;
 
     case G_EVALUATING:
-      // Motor ignores the hand here. A move beyond +-5cm commits to speed
-      // control; staying still and withdrawing is classified as a hold gesture.
+      // A move beyond +-6cm commits to speed control immediately; staying still
+      // and withdrawing is classified as a hold gesture by how long it was held.
       if (abs(d - entryDist) > STILL_TOL) {
-        gstate = G_SPEED;                 // movement confirmed: speed control now
+        gstate = G_SPEED;
 #ifdef INPUT_TOF_WIFI
         swarmGesturePing();               // in swarm (not owning): this hand is a ripple source
 #endif
-        break;                            // enable + mapping are handled in applySpeedControl
+        break;
       }
-      if (d > GESTURE_EXIT) {             // withdrew while still: classify by dwell
+      if (!handPresent) {                 // withdrew while still: classify by dwell
         uint32_t held = now - tEnter;
         if (held < HOLD_TAP_MS)            noteTap(now);          // brief tap -> direction flip on double
-        else if (held < HOLD_MODE_MS)      fireModeChange();      // 1-3s -> next mode (owner only)
+        else if (held < HOLD_MODE_MS)      fireModeChange();      // 1-3s -> next mode
         else if (held < HOLD_HANDOFF_MS)   fireControlToggle();   // 3-8s -> seize / release control
         else if (held >= HOLD_RESET_MS)    fireNetworkReset();    // >15s -> revert to default AP
         // 8-15s: intentional dead buffer, do nothing (avoids accidental reset)
@@ -1621,23 +1615,15 @@ void gestureTick() {
       }
       break;
 
-    case G_SPEED: {
-      static uint32_t tAboveExit = 0;
-      if (d > SPEED_EXIT) {
-        if (tAboveExit == 0) tAboveExit = now;
-        if (now - tAboveExit >= 200) {    // sustained exit, freeze last speed
-          tAboveExit = 0;
-          tExitSpeed = now;
-          waitingReentry = true;
-          gstate = G_IDLE;                // speed/ceiling stays frozen at last value
-          break;
-        }
-      } else {
-        tAboveExit = 0;
-        applySpeedControl();
+    case G_SPEED:
+      if (!handPresent) {                 // hand gone: freeze the speed exactly where it was
+        tExitSpeed = now;
+        waitingReentry = true;
+        gstate = G_IDLE;
+        break;
       }
+      applySpeedControl();
       break;
-    }
   }
 }
 
@@ -1665,7 +1651,7 @@ DNSServer        dns;
 #define DEF_AP_PASS "kinetic123"
 #define DEF_HOST    "sculpture"
 #define OTA_PASS    "kinetic"    // required by the IDE when uploading over WiFi
-#define FW_VERSION  "2.4.3"      // shown in the UI; bump on each release
+#define FW_VERSION  "2.4.4"      // shown in the UI; bump on each release
 // Pre-filled into the OTA box so a fresh board can self-update with one tap. The
 // CI workflow publishes firmware.bin to this rolling "latest" release on push.
 #define DEF_FW_URL  "https://github.com/knnurl/kinesthetic/releases/download/latest/firmware.bin"
