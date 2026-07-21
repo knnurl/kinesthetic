@@ -313,6 +313,13 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
   <div class="sub" style="margin-top:8px">Saved on this device.</div>
  </div>
  <div class="card">
+  <span class="eyebrow">Hand sensor (ToF)</span>
+  <div class="row" style="margin-top:8px"><label>Far = fast (else near = fast)</label><input id="tff" type="checkbox" class="sw" checked onchange="tofSend()"></div>
+  <div class="sub" style="margin:4px 0 6px">Far = lift your hand away to speed up. Near = the opposite (approach to speed up); lifting away then slows to a stop.</div>
+  <div class="fr"><label>Full-speed distance (cm)</label><input id="tmax" class="ti" type="number" min="50" max="100" step="5" value="65" onchange="tofSend()"></div>
+  <div class="sub" style="margin-top:6px">Distance at which the motor reaches full speed (50-100cm). Applied to this sculpture and any connected peers.</div>
+ </div>
+ <div class="card">
   <span class="eyebrow">Interface password</span>
   <div class="sub" style="margin:8px 0 10px">Protects this control page. Leave blank and Save to remove it. The physical network-reset gesture also clears it.</div>
   <input class="ti" id="supw" type="password" placeholder="New password (blank = none)" style="width:100%;box-sizing:border-box;margin-bottom:8px">
@@ -334,7 +341,7 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
 <div id="ph" style="display:none">
  <div class="card">
   <label style="display:block;margin-bottom:6px">Hand gestures (ToF sensor, hold still then withdraw)</label>
-  <div class="sub">The wall ignores a passing hand by default. To take over a sculpture: <b>hold still 3 to 8s, then withdraw</b> (hold again to hand it back). Once you have control:<br>&bull; Move your hand: speed control. Farther (up to ~100cm) = faster, and it enables the motor automatically.<br>&bull; Bring your hand within ~24cm: stop / disable.<br>&bull; Double-tap (two quick in-out): flip direction.<br>&bull; Hold still 1 to 3s, then withdraw: next mode.<br>&bull; Hold still over 15s, then withdraw: reset network to the default access point.</div>
+  <div class="sub">The wall ignores a passing hand by default. To take over a sculpture: <b>hold still 3 to 8s, then withdraw</b> (hold again to hand it back). Once you have control:<br>&bull; Move your hand: speed control. Farther (up to ~65cm) = faster, and it enables the motor automatically.<br>&bull; Bring your hand within ~24cm: stop / disable.<br>&bull; Double-tap (two quick in-out): flip direction.<br>&bull; Hold still 1 to 3s, then withdraw: next mode.<br>&bull; Hold still over 15s, then withdraw: reset network to the default access point.</div>
   <label style="display:block;margin:14px 0 6px">Modes</label>
   <div class="sub">Manual: speed and direction follow your input.<br>Breathe: slow sinusoidal swell, lingers low.<br>Sweep: ramps up, eases through zero, reverses.<br>Wander: organic drifting speed and direction.<br>Tide: minutes-long swell, direction turns each cycle.<br>Pendulum: rocks to and fro, fastest mid-swing.<br>Heartbeat: pulse, echo, long rest.<br>Tap the ? in the mode grid for fuller descriptions.</div>
   <label style="display:block;margin:14px 0 6px">Status pills (top)</label>
@@ -398,7 +405,7 @@ const MODES=['MANUAL','BREATHE','SWEEP','WANDER','TIDE','PENDULUM','HEARTBEAT','
 // variable, so opening the Motion tab clobbered any commands queued while offline.
 let w,en=false,staMode=false,Q=[],MQ=[],qi=-1,St={speed:0,mode:0,en:false};
 let LM=2,ledLoaded=false,ledSeen=false;
-let TK='',PW=localStorage.ks_pw||'',booted=false,spDrag=false,lastLedSent=0,lastMotionSave=0,lastSpSent=0,fwSeen='';
+let TK='',PW=localStorage.ks_pw||'',booted=false,spDrag=false,lastLedSent=0,lastMotionSave=0,lastSpSent=0,fwSeen='',tofInit=false;
 function api(u){return fetch(u+(TK?'?t='+TK:''))}
 function ledMode(m){LM=m;for(let i=0;i<5;i++)document.getElementById('l'+i).className='chip'+(i==m?' on':'');ledSend();}
 function ledSend(){lastLedSent=Date.now();const o={cmd:'led',m:LM,hue:+lhue.value,bri:+lbri.value,rt:+lrt.value};cmd(o);if(fmir.checked)fleetSend(o);}
@@ -456,7 +463,7 @@ function connect(){
   if(t.type=='queueoff'){qen.checked=false;qi=-1;markQueueRow();flash(qnote,'Queue stopped: a mode was chosen directly',QHELP);return;}
   if(t.type=='fwstatus'){fwnote.textContent=
    t.s=='downloading'?'Downloading and installing, do not power off...':
-   t.s=='ok'?'Installed. Rebooting, back in a few seconds...':
+   t.s=='ok'?'Installed. Rebooting, Refresh the page.':
    'Update failed: '+(t.m||'unknown error');return;}
   if(t.type!='tele')return;
   St.speed=t.speed;St.mode=t.mode;St.en=t.enabled;
@@ -485,6 +492,7 @@ function connect(){
   else{flt.textContent='health ok';flt.className='pill ok';}
   nip.textContent=t.netmode+' '+t.netip;
   hnd.style.display=t.hand?'':'none';   // this sculpture is under physical (ToF) control
+  if(t.ff!==undefined&&!tofInit){tofInit=true;tff.checked=!!t.ff;tmax.value=Math.round((t.tmax||650)/10);}
   if(dbgen.checked)dbgRender(t);
   if(reduce)draw();
  };
@@ -742,6 +750,10 @@ function swSenseStatus(){let any=(SEN&&SEN.cue)||Object.values(FSN).some(s=>s&&s
 
 function setSta(v){staMode=v;document.getElementById('nmSta').className='nbtn'+(v?' on':'');document.getElementById('nmAp').className='nbtn'+(v?'':' on');staF.style.display=v?'block':'none';apF.style.display=v?'none':'block';}
 function updS(){stF.style.display=us.checked?'block':'none';}
+// Push the hand-sensor tuning (far/near + full-speed distance) to this sculpture
+// and any connected peers. UI is in cm; firmware wants mm.
+function tofSend(){let o={cmd:'tofcfg',farfast:tff.checked,max:Math.round(+tmax.value)*10};
+ for(const d of swDevs())swSendTo(d.k,o);}
 function loadNet(){api('/net').then(r=>r.json()).then(j=>{
  ssid.value=j.ssid;apssid.value=j.apssid;apip.value=j.apip;host.value=j.host;
  ip.value=j.ip;gw.value=j.gw;mask.value=j.mask;us.checked=j.static;updS();setSta(j.sta);

@@ -218,6 +218,10 @@ bool     tofPresent    = false;   // a ToF ever answered, so its silence is a re
 bool     tofControl    = false;   // false = GUI/swarm owns motion; true = the hand (ToF) has
                                   // seized this sculpture (a 3-8s hold latches it either way)
 int      tofDir        = 1;       // +1/-1 direction for hand speed control; a double tap flips it
+bool     tofFarFast    = true;    // true: far=fast (lift to speed up); false: near=fast. NVS tof_ff
+#define  TOF_MAX_MIN   500        // full-speed distance is GUI-settable within these bounds (mm)
+#define  TOF_MAX_MAX  1000
+int      tofMaxDist    = 650;     // full-speed distance (mm), GUI-settable 500-1000. NVS tof_max
 uint16_t sgLoad        = 0;       // StallGuard load (informational)
 float    speedDerate   = 1.0f;    // health back-off multiplier on all motion
 bool     otaActive     = false;   // true while an OTA update is being written
@@ -1096,6 +1100,8 @@ void loadSettings() {
   senseEnabled = prefs.getBool("sw_sense", true);
   if (prefs.getBytesLength("sw_scfg") == sizeof(scfg))
     prefs.getBytes("sw_scfg", &scfg, sizeof(scfg));   // else keep the compiled default
+  tofFarFast = prefs.getBool("tof_ff", true);
+  tofMaxDist = constrain(prefs.getInt("tof_max", 650), TOF_MAX_MIN, TOF_MAX_MAX);
   Serial.printf("[nvs] restored mode=%u ceil=%d\n", mode, maxSpeedCeiling);
   Serial.printf("[swarm] pos=%.2f,%.2f role=%s\n", swarmX, swarmY,
                 swarmConductor ? "conductor" : "follower");
@@ -1334,15 +1340,17 @@ uint8_t tofAddr = 0x52;
 // Window geometry (millimetres). Speed is now a single unidirectional ramp
 // (far = fast), not a bidirectional dead band; direction is a separate flip.
 #define WIN_START      200   // usable hand band floor (readings clamp up to here)
-#define WIN_END       1000   // usable hand band ceiling / full-speed distance
 #define SPEED_MIN_DIST 240   // at/below this the motor is disabled (24cm)
 #define SPEED_REENABLE 270   // must lift back above this to re-enable (hysteresis)
-#define GESTURE_EXIT  1050   // hand treated as leaving the window beyond here
-#define SPEED_EXIT    1100   // sustained beyond here freezes speed / ends control
 #define REENTRY_HYST    50   // must drop 50mm below exit to re-enter
 #define STILL_TOL       50   // +-5cm: within this a hold counts as "still"; more = speed
 #define NO_HAND_DIST  2000   // sentinel: invalid or beyond usable band = no hand (far)
 #define EMA_ALPHA     0.4f   // distance smoothing, 1.0 = no smoothing, lower = calmer
+// tofMaxDist (runtime, GUI-settable full-speed distance) is the band ceiling; the
+// hand is treated as leaving beyond it + these margins. Runtime, so no longer a
+// compile-time constant.
+#define GESTURE_EXIT (tofMaxDist + 50)
+#define SPEED_EXIT   (tofMaxDist + 100)
 
 // Still-hold classification, measured from beam entry to exit (withdraw):
 //   < HOLD_TAP            a brief tap (two within DOUBLETAP_MS flip direction)
@@ -1357,12 +1365,11 @@ uint8_t tofAddr = 0x52;
 #define DOUBLETAP_MS     900   // max gap between the two brief taps of a direction flip
 
 // Window geometry must stay ordered or the gesture math silently misbehaves.
-static_assert(WIN_START < SPEED_MIN_DIST,   "band floor must be below the disable boundary");
+static_assert(WIN_START < SPEED_MIN_DIST,      "band floor must be below the disable boundary");
 static_assert(SPEED_MIN_DIST < SPEED_REENABLE, "disable boundary must be below its re-enable point");
-static_assert(SPEED_REENABLE < WIN_END,     "re-enable point must sit inside the band");
-static_assert(WIN_END < GESTURE_EXIT,       "gesture exit must be beyond the band ceiling");
-static_assert(GESTURE_EXIT < SPEED_EXIT,    "speed exit must be beyond gesture exit");
-static_assert(SPEED_EXIT < NO_HAND_DIST,    "no hand sentinel must sit beyond speed exit");
+static_assert(SPEED_REENABLE < TOF_MAX_MIN,    "re-enable must sit below the smallest full-speed distance");
+static_assert(TOF_MAX_MIN < TOF_MAX_MAX,       "full-speed distance range must be ordered");
+static_assert(TOF_MAX_MAX + 100 < NO_HAND_DIST, "no-hand sentinel must clear the largest exit threshold");
 static_assert(HOLD_TAP_MS < HOLD_MODE_MS && HOLD_MODE_MS < HOLD_HANDOFF_MS && HOLD_HANDOFF_MS < HOLD_RESET_MS,
               "hold ladder must be strictly increasing");
 
@@ -1455,8 +1462,11 @@ bool sampleToF() {
 // caller (or applySpeedControl) handles the actual disable + hysteresis.
 int speedMagFromDist(int d) {
   if (d <= SPEED_MIN_DIST) return 0;
-  if (d > WIN_END) d = WIN_END;                                       // cap far at full speed
-  float norm = (float)(d - SPEED_MIN_DIST) / (float)(WIN_END - SPEED_MIN_DIST); // 0..1
+  if (d > tofMaxDist) d = tofMaxDist;                                 // cap at full speed
+  float span = (float)(tofMaxDist - SPEED_MIN_DIST);
+  // far = fast: 24cm -> 0, tofMaxDist -> full. near = fast inverts it.
+  float norm = tofFarFast ? (d - SPEED_MIN_DIST) / span
+                          : (tofMaxDist - d) / span;
   return logSpeed(norm, FREQ_MAX);
 }
 
@@ -1648,7 +1658,7 @@ DNSServer        dns;
 #define DEF_AP_PASS "kinetic123"
 #define DEF_HOST    "sculpture"
 #define OTA_PASS    "kinetic"    // required by the IDE when uploading over WiFi
-#define FW_VERSION  "2.4.0"      // shown in the UI; bump on each release
+#define FW_VERSION  "2.4.1"      // shown in the UI; bump on each release
 // Pre-filled into the OTA box so a fresh board can self-update with one tap. The
 // CI workflow publishes firmware.bin to this rolling "latest" release on push.
 #define DEF_FW_URL  "https://github.com/knnurl/kinesthetic/releases/download/latest/firmware.bin"
@@ -2095,6 +2105,13 @@ void onWsEvent(uint8_t n, WStype_t type, uint8_t *payload, size_t len) {
     senseEnabled = d["on"] | true;
     prefs.putBool("sw_sense", senseEnabled);
     Serial.printf("[sense] respond=%s\n", senseEnabled ? "on" : "off");
+  } else if (!strcmp(c, "tofcfg")) {
+    // Per-device hand-sensor tuning: far/near ramp direction + full-speed distance.
+    tofFarFast = d["farfast"] | tofFarFast;
+    tofMaxDist = constrain((int)(d["max"] | tofMaxDist), TOF_MAX_MIN, TOF_MAX_MAX);
+    prefs.putBool("tof_ff", tofFarFast);
+    prefs.putInt("tof_max", tofMaxDist);
+    Serial.printf("[tof] cfg farfast=%d max=%dmm\n", tofFarFast, tofMaxDist);
   } else if (!strcmp(c, "sensecfg")) {
     // Routing matrix lives on the conductor; SwarmSenseCfg fans it to the wall.
     if (!swarmConductor) { ws.sendTXT(n, "{\"type\":\"err\",\"m\":\"not conductor\"}"); return; }
@@ -2169,7 +2186,7 @@ void sendTelemetry() {
     "{\"type\":\"tele\",\"mode\":%u,\"enabled\":%s,\"speed\":%d,\"qi\":%d,\"gesture\":\"%s\","
     "\"derate\":%d,\"fault\":{\"tmc\":%s,\"otp\":%s,\"tof\":%s},\"sg\":%u,"
     "\"netmode\":\"%s\",\"netip\":\"%s\",\"sl\":%d,\"hand\":%d,"
-    "\"tof\":%d,\"tofp\":%d,\"ta\":%u,\"dir\":%d,\"heap\":%u,\"up\":%lu,"
+    "\"tof\":%d,\"tofp\":%d,\"ta\":%u,\"dir\":%d,\"ff\":%d,\"tmax\":%d,\"heap\":%u,\"up\":%lu,"
     "\"sw\":{\"on\":%d,\"cond\":%d,\"sync\":%d,\"x\":%.2f,\"y\":%.2f,\"pat\":%u,\"amp\":%.2f},"
     "\"sen\":{\"en\":%d,\"cue\":%d,\"g\":%.2f,\"blobs\":%u,\"mode\":%u},"
     "\"leds\":" LEDS_JSON "}",
@@ -2180,7 +2197,8 @@ void sendTelemetry() {
     faultOvertemp ? "true" : "false",
     faultTof ? "true" : "false",
     sgLoad, netMode.c_str(), netIp.c_str(), sliderPctForTele(), tofControl ? 1 : 0,
-    filtDist, tofPresent ? 1 : 0, (unsigned)tofAddr, tofDir, (unsigned)ESP.getFreeHeap(), (unsigned long)(millis() / 1000),
+    filtDist, tofPresent ? 1 : 0, (unsigned)tofAddr, tofDir, tofFarFast ? 1 : 0, tofMaxDist,
+    (unsigned)ESP.getFreeHeap(), (unsigned long)(millis() / 1000),
     (mode == MODE_SWARM) ? 1 : 0, swarmConductor ? 1 : 0,
     (swarmConductor || (swarmLastBeacon && millis() - swarmLastBeacon < SWARM_TIMEOUT_MS)) ? 1 : 0,
     swarmX, swarmY, swarmPatternId, swarmAmp,
