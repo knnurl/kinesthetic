@@ -216,7 +216,8 @@ bool     faultOvertemp = false;   // TMC2209 overtemperature prewarning active
 bool     faultTof      = false;   // a PRESENT ToF sensor died; never set when none is fitted
 bool     tofPresent    = false;   // a ToF ever answered, so its silence is a real fault
 bool     tofControl    = false;   // false = GUI/swarm owns motion; true = the hand (ToF) has
-                                  // seized this sculpture (a double tap latches it either way)
+                                  // seized this sculpture (a 3-8s hold latches it either way)
+int      tofDir        = 1;       // +1/-1 direction for hand speed control; a double tap flips it
 uint16_t sgLoad        = 0;       // StallGuard load (informational)
 float    speedDerate   = 1.0f;    // health back-off multiplier on all motion
 bool     otaActive     = false;   // true while an OTA update is being written
@@ -1330,36 +1331,40 @@ void inputUpdate() {
 // different part, the VL53L5CX, and is not used here.)
 uint8_t tofAddr = 0x52;
 
-// Window geometry (millimetres)
-#define WIN_START      250
-#define WIN_END        650
-#define DB_LOW         420
-#define DB_CENTRE      450
-#define DB_HIGH        480
-#define GESTURE_EXIT   650
-#define SPEED_EXIT     700
+// Window geometry (millimetres). Speed is now a single unidirectional ramp
+// (far = fast), not a bidirectional dead band; direction is a separate flip.
+#define WIN_START      200   // usable hand band floor (readings clamp up to here)
+#define WIN_END       1000   // usable hand band ceiling / full-speed distance
+#define SPEED_MIN_DIST 240   // at/below this the motor is disabled (24cm)
+#define SPEED_REENABLE 270   // must lift back above this to re-enable (hysteresis)
+#define GESTURE_EXIT  1050   // hand treated as leaving the window beyond here
+#define SPEED_EXIT    1100   // sustained beyond here freezes speed / ends control
 #define REENTRY_HYST    50   // must drop 50mm below exit to re-enter
+#define STILL_TOL       50   // +-5cm: within this a hold counts as "still"; more = speed
 #define NO_HAND_DIST  2000   // sentinel: invalid or beyond usable band = no hand (far)
 #define EMA_ALPHA     0.4f   // distance smoothing, 1.0 = no smoothing, lower = calmer
 
-// Still-hold classification, measured from beam entry to exit:
-//   < HOLD_IGNORE         ignored (accidental)
-//   HOLD_IGNORE..MODE     mode change
-//   MODE..ENABLE          enable / disable toggle
-//   > ENABLE              network reset to default AP (WiFi build)
-#define HOLD_IGNORE_MS  2000
-#define HOLD_MODE_MS    5000
-#define HOLD_ENABLE_MS 15000
-#define DOUBLETAP_MS    900   // max gap between the two brief taps of a control handoff
+// Still-hold classification, measured from beam entry to exit (withdraw):
+//   < HOLD_TAP            a brief tap (two within DOUBLETAP_MS flip direction)
+//   HOLD_TAP..MODE        next mode          (owner only)
+//   MODE..HANDOFF         seize / release hand control
+//   HANDOFF..RESET        ignored (buffer, so a long hold does not reset by accident)
+//   > RESET               network reset to default AP (WiFi build)
+#define HOLD_TAP_MS     1000
+#define HOLD_MODE_MS    3000
+#define HOLD_HANDOFF_MS 8000
+#define HOLD_RESET_MS  15000
+#define DOUBLETAP_MS     900   // max gap between the two brief taps of a direction flip
 
 // Window geometry must stay ordered or the gesture math silently misbehaves.
-static_assert(WIN_START < DB_LOW,  "window start must be below dead band low");
-static_assert(DB_LOW < DB_CENTRE,  "dead band low must be below centre");
-static_assert(DB_CENTRE < DB_HIGH, "centre must be below dead band high");
-static_assert(DB_HIGH < WIN_END,   "dead band high must be below window end");
-static_assert(GESTURE_EXIT <= WIN_END,  "gesture exit must be within the window");
-static_assert(SPEED_EXIT > GESTURE_EXIT, "speed exit must be beyond gesture exit");
-static_assert(WIN_END < NO_HAND_DIST,    "no hand sentinel must sit beyond the window");
+static_assert(WIN_START < SPEED_MIN_DIST,   "band floor must be below the disable boundary");
+static_assert(SPEED_MIN_DIST < SPEED_REENABLE, "disable boundary must be below its re-enable point");
+static_assert(SPEED_REENABLE < WIN_END,     "re-enable point must sit inside the band");
+static_assert(WIN_END < GESTURE_EXIT,       "gesture exit must be beyond the band ceiling");
+static_assert(GESTURE_EXIT < SPEED_EXIT,    "speed exit must be beyond gesture exit");
+static_assert(SPEED_EXIT < NO_HAND_DIST,    "no hand sentinel must sit beyond speed exit");
+static_assert(HOLD_TAP_MS < HOLD_MODE_MS && HOLD_MODE_MS < HOLD_HANDOFF_MS && HOLD_HANDOFF_MS < HOLD_RESET_MS,
+              "hold ladder must be strictly increasing");
 
 // Gesture FSM
 enum GState : uint8_t { G_IDLE = 0, G_ACQUIRING, G_EVALUATING, G_SPEED };
@@ -1434,8 +1439,9 @@ bool sampleToF() {
   if (d < 0) { if (failRun < 0xFFFF) failRun++; }   // raw read failed
   else { failRun = 0; tofPresent = true; }          // a good read: sensor is fitted (hot-plug ok)
   faultTof = tofPresent && (failRun > 60);           // only a PRESENT sensor going silent is a fault
-  if (d < 0 || d > NO_HAND_DIST) d = NO_HAND_DIST;   // no hand / out of range = far
-  med[medIdx] = d;
+  if (d < 0 || d > NO_HAND_DIST) d = NO_HAND_DIST;   // invalid / far beyond reach = no hand
+  else if (d < WIN_START) d = WIN_START;             // clamp very near readings up to 200mm
+  med[medIdx] = d;                                    // (the far/speed cap at 1000 is in the ramp)
   medIdx = (medIdx + 1) % 3;
   int m = median3(med[0], med[1], med[2]);
   if (!emaInit) { emaDist = m; emaInit = true; }
@@ -1444,31 +1450,27 @@ bool sampleToF() {
   return true;
 }
 
-// Map current distance to a SIGNED manual speed (bidirectional, dead band).
-int manualSpeedFromDist(int d) {
-  if (d <= DB_LOW) {
-    // Forward zone 250..420, closer = faster
-    float norm = (float)(DB_LOW - d) / (float)(DB_LOW - WIN_START); // 0..1
-    return logSpeed(norm, FREQ_MAX);
-  } else if (d >= DB_HIGH) {
-    // Reverse zone 480..650, further = faster
-    float norm = (float)(d - DB_HIGH) / (float)(WIN_END - DB_HIGH); // 0..1
-    return -logSpeed(norm, FREQ_MAX);
-  }
-  return 0;  // dead band 420..480
-}
-
-// Map current distance to a ceiling for BREATHE/SWEEP/WANDER.
-// closer = lower ceiling, further = higher ceiling.
-int ceilingFromDist(int d) {
-  float norm = (float)(d - WIN_START) / (float)(WIN_END - WIN_START); // 0..1
+// Distance -> unsigned speed magnitude on a single ramp: SPEED_MIN_DIST..WIN_END
+// maps to 0..FREQ_MAX, far = fast. Below the disable boundary returns 0; the
+// caller (or applySpeedControl) handles the actual disable + hysteresis.
+int speedMagFromDist(int d) {
+  if (d <= SPEED_MIN_DIST) return 0;
+  if (d > WIN_END) d = WIN_END;                                       // cap far at full speed
+  float norm = (float)(d - SPEED_MIN_DIST) / (float)(WIN_END - SPEED_MIN_DIST); // 0..1
   return logSpeed(norm, FREQ_MAX);
 }
 
-// A double tap (two brief taps within DOUBLETAP_MS) hands motion control between
-// the web GUI/swarm and the physical hand, and latches until tapped again. On
-// seizing, the sculpture leaves the swarm and ignores remote drive commands so
-// the person at it always wins; releasing lets it rejoin / obey the GUI again.
+// Signed manual speed = magnitude * the current hand-control direction.
+int manualSpeedFromDist(int d) { return tofDir * speedMagFromDist(d); }
+
+// Ceiling for the auto modes (BREATHE/SWEEP/WANDER); direction is applied by the
+// mode generators through lastManualDir, so this stays unsigned.
+int ceilingFromDist(int d) { return speedMagFromDist(d); }
+
+// A 3-8s still-hold hands motion control between the web GUI/swarm and the
+// physical hand, and latches until held again. On seizing, the sculpture leaves
+// the swarm and ignores remote drive commands so the person at it always wins;
+// releasing lets it rejoin / obey the GUI again.
 void fireControlToggle() {
   tofControl = !tofControl;
   if (tofControl) {
@@ -1481,24 +1483,28 @@ void fireControlToggle() {
   Serial.printf("[gesture] control -> %s\n", tofControl ? "HAND (ToF)" : "GUI/swarm");
 }
 
+// A double tap (two brief taps within DOUBLETAP_MS) flips the hand-control
+// direction. Only meaningful while the hand owns control.
+void fireDirFlip() {
+  if (!tofControl) return;
+  tofDir = -tofDir;
+  lastManualDir = tofDir;              // so the auto modes reverse too
+  Serial.printf("[gesture] direction -> %s\n", tofDir > 0 ? "FWD" : "REV");
+}
+
 uint32_t tLastTap = 0;
 void noteTap(uint32_t now) {
-  if (tLastTap && now - tLastTap < DOUBLETAP_MS) { fireControlToggle(); tLastTap = 0; }
+  if (tLastTap && now - tLastTap < DOUBLETAP_MS) { fireDirFlip(); tLastTap = 0; }
   else tLastTap = now;
 }
 
-// Mode and enable holds only drive the motor while the hand owns control. The
-// grab (double tap) and the >15s network reset are always live.
+// The mode hold only drives while the hand owns control. Handoff (3-8s) and the
+// >15s network reset are always live (that is how you seize control in the first
+// place, and the reset is the recovery lifeline).
 void fireModeChange() {
   if (!tofControl) return;
   userSelectMode((mode + 1) % (MODE_COUNT - 1));   // cycle the real modes; SWARM is not in the rotation
   Serial.printf("[gesture] mode change -> %u\n", mode);
-}
-
-void fireEnableToggle() {
-  if (!tofControl) return;
-  motorEnabled = !motorEnabled;
-  Serial.printf("[gesture] enable toggle -> %s\n", motorEnabled ? "ON" : "OFF");
 }
 
 void fireNetworkReset() {
@@ -1519,18 +1525,26 @@ void fireNetworkReset() {
 }
 
 void applySpeedControl() {
-  // Live mapping while in SPEED_CONTROL, mode dependent.
-  // The hand drives the motor only when it owns control (grabbed via double tap).
-  // Otherwise the GUI/swarm owns it; in SWARM the hand is a ripple source instead
-  // (swarmGesturePing), and the double tap + >15s reset gestures are still live.
+  // Live distance -> speed while the hand owns control. Otherwise the GUI/swarm
+  // owns it; in SWARM the hand is a ripple source instead (swarmGesturePing).
   if (!tofControl) return;
   if (mode == MODE_SWARM) return;   // defensive: a grab already broke it out of swarm
+  int d = filtDist;
+  // Close = stop: at/below the disable boundary, cut the motor (hysteresis keeps
+  // it off until the hand lifts back above the re-enable point).
+  if (d <= SPEED_MIN_DIST) {
+    motorEnabled = false;
+    if (mode == MANUAL) manualSpeed = 0;
+    return;
+  }
+  // In the speed band: enable first if the motor was off, then map distance.
+  if (!motorEnabled && d >= SPEED_REENABLE) motorEnabled = true;
   if (mode == MANUAL) {
-    int s = manualSpeedFromDist(filtDist);
+    int s = manualSpeedFromDist(d);
     manualSpeed = s;
     if (s > 0) lastManualDir = 1; else if (s < 0) lastManualDir = -1;
   } else {
-    maxSpeedCeiling = ceilingFromDist(filtDist);
+    maxSpeedCeiling = ceilingFromDist(d);
   }
 }
 
@@ -1570,30 +1584,22 @@ void gestureTick() {
       break;
 
     case G_EVALUATING:
-      // Motor ignores the hand completely here. No speed changes.
-      if (abs(d - entryDist) > 30) {
+      // Motor ignores the hand here. A move beyond +-5cm commits to speed
+      // control; staying still and withdrawing is classified as a hold gesture.
+      if (abs(d - entryDist) > STILL_TOL) {
         gstate = G_SPEED;                 // movement confirmed: speed control now
 #ifdef INPUT_TOF_WIFI
-        swarmGesturePing();               // in swarm: this hand becomes a ripple source
+        swarmGesturePing();               // in swarm (not owning): this hand is a ripple source
 #endif
-        // Auto enable only when the hand owns control (a double tap grabbed it).
-        if (tofControl && !motorEnabled) {
-          motorEnabled = true;
-          Serial.println("[gesture] auto-enable on speed control");
-        }
-        break;
+        break;                            // enable + mapping are handled in applySpeedControl
       }
-      if (d > GESTURE_EXIT) {             // hand left while still
+      if (d > GESTURE_EXIT) {             // withdrew while still: classify by dwell
         uint32_t held = now - tEnter;
-        if (held < HOLD_IGNORE_MS) {
-          noteTap(now);                   // brief tap: half of a control-handoff double tap
-        } else if (held <= HOLD_MODE_MS) {
-          fireModeChange();
-        } else if (held <= HOLD_ENABLE_MS) {
-          fireEnableToggle();
-        } else {
-          fireNetworkReset();             // > 15s: revert to default AP
-        }
+        if (held < HOLD_TAP_MS)            noteTap(now);          // brief tap -> direction flip on double
+        else if (held < HOLD_MODE_MS)      fireModeChange();      // 1-3s -> next mode (owner only)
+        else if (held < HOLD_HANDOFF_MS)   fireControlToggle();   // 3-8s -> seize / release control
+        else if (held >= HOLD_RESET_MS)    fireNetworkReset();    // >15s -> revert to default AP
+        // 8-15s: intentional dead buffer, do nothing (avoids accidental reset)
         gstate = G_IDLE;
       }
       break;
@@ -1642,7 +1648,7 @@ DNSServer        dns;
 #define DEF_AP_PASS "kinetic123"
 #define DEF_HOST    "sculpture"
 #define OTA_PASS    "kinetic"    // required by the IDE when uploading over WiFi
-#define FW_VERSION  "2.3.4"      // shown in the UI; bump on each release
+#define FW_VERSION  "2.4.0"      // shown in the UI; bump on each release
 // Pre-filled into the OTA box so a fresh board can self-update with one tap. The
 // CI workflow publishes firmware.bin to this rolling "latest" release on push.
 #define DEF_FW_URL  "https://github.com/knnurl/kinesthetic/releases/download/latest/firmware.bin"
@@ -2163,7 +2169,7 @@ void sendTelemetry() {
     "{\"type\":\"tele\",\"mode\":%u,\"enabled\":%s,\"speed\":%d,\"qi\":%d,\"gesture\":\"%s\","
     "\"derate\":%d,\"fault\":{\"tmc\":%s,\"otp\":%s,\"tof\":%s},\"sg\":%u,"
     "\"netmode\":\"%s\",\"netip\":\"%s\",\"sl\":%d,\"hand\":%d,"
-    "\"tof\":%d,\"tofp\":%d,\"ta\":%u,\"heap\":%u,\"up\":%lu,"
+    "\"tof\":%d,\"tofp\":%d,\"ta\":%u,\"dir\":%d,\"heap\":%u,\"up\":%lu,"
     "\"sw\":{\"on\":%d,\"cond\":%d,\"sync\":%d,\"x\":%.2f,\"y\":%.2f,\"pat\":%u,\"amp\":%.2f},"
     "\"sen\":{\"en\":%d,\"cue\":%d,\"g\":%.2f,\"blobs\":%u,\"mode\":%u},"
     "\"leds\":" LEDS_JSON "}",
@@ -2174,7 +2180,7 @@ void sendTelemetry() {
     faultOvertemp ? "true" : "false",
     faultTof ? "true" : "false",
     sgLoad, netMode.c_str(), netIp.c_str(), sliderPctForTele(), tofControl ? 1 : 0,
-    filtDist, tofPresent ? 1 : 0, (unsigned)tofAddr, (unsigned)ESP.getFreeHeap(), (unsigned long)(millis() / 1000),
+    filtDist, tofPresent ? 1 : 0, (unsigned)tofAddr, tofDir, (unsigned)ESP.getFreeHeap(), (unsigned long)(millis() / 1000),
     (mode == MODE_SWARM) ? 1 : 0, swarmConductor ? 1 : 0,
     (swarmConductor || (swarmLastBeacon && millis() - swarmLastBeacon < SWARM_TIMEOUT_MS)) ? 1 : 0,
     swarmX, swarmY, swarmPatternId, swarmAmp,

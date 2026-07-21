@@ -334,7 +334,7 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
 <div id="ph" style="display:none">
  <div class="card">
   <label style="display:block;margin-bottom:6px">Hand gestures (ToF sensor, hold still then withdraw)</label>
-  <div class="sub">Move hand more than 3cm: speed control (closer = slower, bidirectional).<br>Hold still 2 to 5s, then withdraw: next mode.<br>Hold still 5 to 15s, then withdraw: enable / disable.<br>Hold still over 15s, then withdraw: reset network to the default access point.</div>
+  <div class="sub">The wall ignores a passing hand by default. To take over a sculpture: <b>hold still 3 to 8s, then withdraw</b> (hold again to hand it back). Once you have control:<br>&bull; Move your hand: speed control. Farther (up to ~100cm) = faster, and it enables the motor automatically.<br>&bull; Bring your hand within ~24cm: stop / disable.<br>&bull; Double-tap (two quick in-out): flip direction.<br>&bull; Hold still 1 to 3s, then withdraw: next mode.<br>&bull; Hold still over 15s, then withdraw: reset network to the default access point.</div>
   <label style="display:block;margin:14px 0 6px">Modes</label>
   <div class="sub">Manual: speed and direction follow your input.<br>Breathe: slow sinusoidal swell, lingers low.<br>Sweep: ramps up, eases through zero, reverses.<br>Wander: organic drifting speed and direction.<br>Tide: minutes-long swell, direction turns each cycle.<br>Pendulum: rocks to and fro, fastest mid-swing.<br>Heartbeat: pulse, echo, long rest.<br>Tap the ? in the mode grid for fuller descriptions.</div>
   <label style="display:block;margin:14px 0 6px">Status pills (top)</label>
@@ -754,7 +754,7 @@ function dbgRender(t){let f=t.fault||{},sw=t.sw||{},sn=t.sen||{};
   'fw '+(fwver.textContent||'-')+'   uptime '+fmtUp(t.up),
   'mode '+(MODES[t.mode]||t.mode)+(t.hand?'  [HAND CONTROL]':'')+'   '+(t.enabled?'ENABLED':'standby'),
   'speed '+t.speed+' st/s   slider '+t.sl+'%',
-  'control '+(t.hand?'HAND (ToF drives this sculpture)':'GUI / swarm  (double-tap sensor to take over)'),
+  'control '+(t.hand?('HAND (ToF drives it, dir '+(t.dir<0?'REV':'FWD')+')'):'GUI / swarm  (hold 3-8s to take over)'),
   'gesture '+t.gesture+'   tof '+(!t.tofp?'NOT CONNECTED':(t.tof>=2000?'no hand':t.tof+' mm'))+(t.ta?'  @0x'+(t.ta).toString(16):''),
   'health  tmc:'+(f.tmc?'read-fault':'ok')+'  otp:'+(f.otp?('WARN '+t.derate+'%'):'ok')+'  tof:'+(f.tof?'FAULT':'ok'),
   'stallguard '+t.sg+'   derate '+t.derate+'%',
