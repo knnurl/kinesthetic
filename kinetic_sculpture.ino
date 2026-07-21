@@ -1477,11 +1477,12 @@ int manualSpeedFromDist(int d) { return tofDir * speedMagFromDist(d); }
 // mode generators through lastManualDir, so this stays unsigned.
 int ceilingFromDist(int d) { return speedMagFromDist(d); }
 
-// A 3-8s still-hold hands motion control between the web GUI/swarm and the
-// physical hand, and latches until held again. On seizing, the sculpture leaves
-// the swarm and ignores remote drive commands so the person at it always wins;
-// releasing lets it rejoin / obey the GUI again.
+// A 3-8s still-hold seizes a sculpture OUT of a running swarm for hand control,
+// and hands it back when held again. Standalone sculptures already respond to the
+// hand, so there is nothing to seize there (this is a no-op unless swarming or
+// already seized). While seized the device ignores remote drive commands.
 void fireControlToggle() {
+  if (mode != MODE_SWARM && !tofControl) return;   // nothing to seize when not swarming
   tofControl = !tofControl;
   if (tofControl) {
     if (mode == MODE_SWARM) swarmSetActive(false);
@@ -1496,7 +1497,7 @@ void fireControlToggle() {
 // A double tap (two brief taps within DOUBLETAP_MS) flips the hand-control
 // direction. Only meaningful while the hand owns control.
 void fireDirFlip() {
-  if (!tofControl) return;
+  if (mode == MODE_SWARM) return;   // only meaningful while the hand is driving
   tofDir = -tofDir;
   lastManualDir = tofDir;              // so the auto modes reverse too
   Serial.printf("[gesture] direction -> %s\n", tofDir > 0 ? "FWD" : "REV");
@@ -1512,7 +1513,7 @@ void noteTap(uint32_t now) {
 // >15s network reset are always live (that is how you seize control in the first
 // place, and the reset is the recovery lifeline).
 void fireModeChange() {
-  if (!tofControl) return;
+  if (mode == MODE_SWARM) return;   // cannot re-mode a swarm follower without seizing it first
   userSelectMode((mode + 1) % (MODE_COUNT - 1));   // cycle the real modes; SWARM is not in the rotation
   Serial.printf("[gesture] mode change -> %u\n", mode);
 }
@@ -1535,10 +1536,11 @@ void fireNetworkReset() {
 }
 
 void applySpeedControl() {
-  // Live distance -> speed while the hand owns control. Otherwise the GUI/swarm
-  // owns it; in SWARM the hand is a ripple source instead (swarmGesturePing).
-  if (!tofControl) return;
-  if (mode == MODE_SWARM) return;   // defensive: a grab already broke it out of swarm
+  // The hand drives the motor whenever the device is NOT running the choreographed
+  // swarm: standalone / MANUAL / auto modes all respond directly, no seize needed.
+  // While it is in the swarm, a wave is only a ripple source (swarmGesturePing);
+  // a 3-8s hold seizes it (which breaks it out to MANUAL, so it lands here).
+  if (mode == MODE_SWARM) return;
   int d = filtDist;
   // Close = stop: at/below the disable boundary, cut the motor (hysteresis keeps
   // it off until the hand lifts back above the re-enable point).
@@ -1658,7 +1660,7 @@ DNSServer        dns;
 #define DEF_AP_PASS "kinetic123"
 #define DEF_HOST    "sculpture"
 #define OTA_PASS    "kinetic"    // required by the IDE when uploading over WiFi
-#define FW_VERSION  "2.4.1"      // shown in the UI; bump on each release
+#define FW_VERSION  "2.4.2"      // shown in the UI; bump on each release
 // Pre-filled into the OTA box so a fresh board can self-update with one tap. The
 // CI workflow publishes firmware.bin to this rolling "latest" release on push.
 #define DEF_FW_URL  "https://github.com/knnurl/kinesthetic/releases/download/latest/firmware.bin"
