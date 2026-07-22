@@ -222,6 +222,7 @@ bool     tofFarFast    = true;    // true: far=fast (lift to speed up); false: n
 #define  TOF_MAX_MIN   500        // full-speed distance is GUI-settable within these bounds (mm)
 #define  TOF_MAX_MAX  1000
 int      tofMaxDist    = 650;     // full-speed distance (mm), GUI-settable 500-1000. NVS tof_max
+bool     tofEnabled    = true;    // master enable for the hand sensor / gestures. NVS tof_en
 uint16_t sgLoad        = 0;       // StallGuard load (informational)
 float    speedDerate   = 1.0f;    // health back-off multiplier on all motion
 bool     otaActive     = false;   // true while an OTA update is being written
@@ -1102,6 +1103,7 @@ void loadSettings() {
     prefs.getBytes("sw_scfg", &scfg, sizeof(scfg));   // else keep the compiled default
   tofFarFast = prefs.getBool("tof_ff", true);
   tofMaxDist = constrain(prefs.getInt("tof_max", 650), TOF_MAX_MIN, TOF_MAX_MAX);
+  tofEnabled = prefs.getBool("tof_en", true);
   Serial.printf("[nvs] restored mode=%u ceil=%d\n", mode, maxSpeedCeiling);
   Serial.printf("[swarm] pos=%.2f,%.2f role=%s\n", swarmX, swarmY,
                 swarmConductor ? "conductor" : "follower");
@@ -1577,6 +1579,7 @@ void applySpeedControl() {
 
 void gestureTick() {
   if (!sampleToF()) return;
+  if (!tofEnabled) { gstate = G_IDLE; return; }   // sensor read still feeds diagnostics; gestures off
   uint32_t now = millis();
   int d = filtDist;
 
@@ -1651,7 +1654,7 @@ DNSServer        dns;
 #define DEF_AP_PASS "kinetic123"
 #define DEF_HOST    "sculpture"
 #define OTA_PASS    "kinetic"    // required by the IDE when uploading over WiFi
-#define FW_VERSION  "2.4.4"      // shown in the UI; bump on each release
+#define FW_VERSION  "2.4.5"      // shown in the UI; bump on each release
 // Pre-filled into the OTA box so a fresh board can self-update with one tap. The
 // CI workflow publishes firmware.bin to this rolling "latest" release on push.
 #define DEF_FW_URL  "https://github.com/knnurl/kinesthetic/releases/download/latest/firmware.bin"
@@ -2099,12 +2102,14 @@ void onWsEvent(uint8_t n, WStype_t type, uint8_t *payload, size_t len) {
     prefs.putBool("sw_sense", senseEnabled);
     Serial.printf("[sense] respond=%s\n", senseEnabled ? "on" : "off");
   } else if (!strcmp(c, "tofcfg")) {
-    // Per-device hand-sensor tuning: far/near ramp direction + full-speed distance.
+    // Per-device hand-sensor tuning: enable + far/near ramp + full-speed distance.
+    tofEnabled = d["en"] | tofEnabled;
     tofFarFast = d["farfast"] | tofFarFast;
     tofMaxDist = constrain((int)(d["max"] | tofMaxDist), TOF_MAX_MIN, TOF_MAX_MAX);
+    prefs.putBool("tof_en", tofEnabled);
     prefs.putBool("tof_ff", tofFarFast);
     prefs.putInt("tof_max", tofMaxDist);
-    Serial.printf("[tof] cfg farfast=%d max=%dmm\n", tofFarFast, tofMaxDist);
+    Serial.printf("[tof] cfg en=%d farfast=%d max=%dmm\n", tofEnabled, tofFarFast, tofMaxDist);
   } else if (!strcmp(c, "sensecfg")) {
     // Routing matrix lives on the conductor; SwarmSenseCfg fans it to the wall.
     if (!swarmConductor) { ws.sendTXT(n, "{\"type\":\"err\",\"m\":\"not conductor\"}"); return; }
@@ -2187,7 +2192,7 @@ void sendTelemetry() {
     "{\"type\":\"tele\",\"mode\":%u,\"enabled\":%s,\"speed\":%d,\"qi\":%d,\"gesture\":\"%s\","
     "\"derate\":%d,\"fault\":{\"tmc\":%s,\"otp\":%s,\"tof\":%s},\"sg\":%u,"
     "\"netmode\":\"%s\",\"netip\":\"%s\",\"sl\":%d,\"hand\":%d,"
-    "\"tof\":%d,\"tofp\":%d,\"ta\":%u,\"dir\":%d,\"ff\":%d,\"tmax\":%d,\"heap\":%u,\"up\":%lu,"
+    "\"tof\":%d,\"tofp\":%d,\"ta\":%u,\"dir\":%d,\"ten\":%d,\"ff\":%d,\"tmax\":%d,\"heap\":%u,\"up\":%lu,"
     "\"sw\":{\"on\":%d,\"cond\":%d,\"sync\":%d,\"x\":%.2f,\"y\":%.2f,\"pat\":%u,\"amp\":%.2f},"
     "\"sen\":{\"en\":%d,\"cue\":%d,\"g\":%.2f,\"blobs\":%u,\"mode\":%u},"
     "\"leds\":" LEDS_JSON "}",
@@ -2198,7 +2203,7 @@ void sendTelemetry() {
     faultOvertemp ? "true" : "false",
     faultTof ? "true" : "false",
     sgLoad, netMode.c_str(), netIp.c_str(), sliderPctForTele(), tofControl ? 1 : 0,
-    filtDist, tofPresent ? 1 : 0, (unsigned)tofAddr, tofDir, tofFarFast ? 1 : 0, tofMaxDist,
+    filtDist, tofPresent ? 1 : 0, (unsigned)tofAddr, tofDir, tofEnabled ? 1 : 0, tofFarFast ? 1 : 0, tofMaxDist,
     (unsigned)ESP.getFreeHeap(), (unsigned long)(millis() / 1000),
     (mode == MODE_SWARM) ? 1 : 0, swarmConductor ? 1 : 0,
     (swarmConductor || (swarmLastBeacon && millis() - swarmLastBeacon < SWARM_TIMEOUT_MS)) ? 1 : 0,

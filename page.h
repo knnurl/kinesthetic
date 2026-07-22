@@ -314,6 +314,8 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border:0;border-radiu
  </div>
  <div class="card">
   <span class="eyebrow">Hand sensor (ToF)</span>
+  <div class="row" style="margin-top:8px"><label>Enable hand sensor</label><input id="ten" type="checkbox" class="sw" checked onchange="tofSend()"></div>
+  <div class="sub" style="margin:4px 0 6px">Off = ignore the ToF entirely (no gesture / hand control on this sculpture).</div>
   <div class="row" style="margin-top:8px"><label>Far = fast (else near = fast)</label><input id="tff" type="checkbox" class="sw" checked onchange="tofSend()"></div>
   <div class="sub" style="margin:4px 0 6px">Far = lift your hand away to speed up. Near = the opposite (approach to speed up); lifting away then slows to a stop.</div>
   <div class="fr"><label>Full-speed distance (cm)</label><input id="tmax" class="ti" type="number" min="50" max="100" step="5" value="65" onchange="tofSend()"></div>
@@ -492,7 +494,7 @@ function connect(){
   else{flt.textContent='health ok';flt.className='pill ok';}
   nip.textContent=t.netmode+' '+t.netip;
   hnd.style.display=t.hand?'':'none';   // this sculpture is under physical (ToF) control
-  if(t.ff!==undefined&&!tofInit){tofInit=true;tff.checked=!!t.ff;tmax.value=Math.round((t.tmax||650)/10);}
+  if(t.ff!==undefined&&!tofInit){tofInit=true;ten.checked=t.ten!==0;tff.checked=!!t.ff;tmax.value=Math.round((t.tmax||650)/10);}
   if(dbgen.checked)dbgRender(t);
   if(reduce)draw();
  };
@@ -752,7 +754,7 @@ function setSta(v){staMode=v;document.getElementById('nmSta').className='nbtn'+(
 function updS(){stF.style.display=us.checked?'block':'none';}
 // Push the hand-sensor tuning (far/near + full-speed distance) to this sculpture
 // and any connected peers. UI is in cm; firmware wants mm.
-function tofSend(){let o={cmd:'tofcfg',farfast:tff.checked,max:Math.round(+tmax.value)*10};
+function tofSend(){let o={cmd:'tofcfg',en:ten.checked,farfast:tff.checked,max:Math.round(+tmax.value)*10};
  for(const d of swDevs())swSendTo(d.k,o);}
 function loadNet(){api('/net').then(r=>r.json()).then(j=>{
  ssid.value=j.ssid;apssid.value=j.apssid;apip.value=j.apip;host.value=j.host;
