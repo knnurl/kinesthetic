@@ -226,6 +226,57 @@ int      tofMaxDist    = 650;     // full-speed distance (mm), GUI-settable 500-
 bool     tofEnabled    = true;    // master enable for the hand sensor / gestures. NVS tof_en
 uint16_t sgLoad        = 0;       // StallGuard load (informational)
 float    speedDerate   = 1.0f;    // health back-off multiplier on all motion
+
+// ============================================================
+//  BOOT DIAGNOSTICS
+//  Answers "why did the board reset" without a PC attached. Values are
+//  captured once at boot and surfaced in the web GUI Help panel.
+//
+//  RTC_NOINIT_ATTR survives a reset (software, panic, watchdog, and in the
+//  usual case brownout) because the RTC domain stays powered through the
+//  reset pulse. It is deliberately NOT cleared on a warm boot: a magic word
+//  tells us whether the values are carried over or garbage from a genuine
+//  cold power-up. If the rail collapses hard enough to drop the RTC domain
+//  too, the counters restart and the reason reads as a power-on, which is
+//  itself the signal that power was fully lost rather than merely sagging.
+// ============================================================
+#define BOOTDIAG_MAGIC 0xB007D1A6
+RTC_NOINIT_ATTR uint32_t rtcMagic;
+RTC_NOINIT_ATTR uint32_t rtcBootCount;
+RTC_NOINIT_ATTR uint32_t rtcLastRunSec;   // uptime reached just before the reset
+RTC_NOINIT_ATTR uint32_t rtcRunSec;       // live uptime, ticked once per second
+
+const char *resetReasonStr = "unknown";
+uint32_t bootCount = 1, lastRunSec = 0;
+
+void captureBootDiag() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  resetReasonStr = "power-on";  break;
+    case ESP_RST_BROWNOUT: resetReasonStr = "BROWNOUT";  break;   // supply sagged
+    case ESP_RST_PANIC:    resetReasonStr = "PANIC";     break;   // firmware crash
+    case ESP_RST_INT_WDT:  resetReasonStr = "WDT-int";   break;
+    case ESP_RST_TASK_WDT: resetReasonStr = "WDT-task";  break;
+    case ESP_RST_WDT:      resetReasonStr = "WDT-other"; break;
+    case ESP_RST_SW:       resetReasonStr = "sw-restart"; break;  // our own ESP.restart
+    case ESP_RST_DEEPSLEEP: resetReasonStr = "deepsleep"; break;
+    case ESP_RST_EXT:      resetReasonStr = "ext-pin";   break;
+    default:               resetReasonStr = "unknown";   break;
+  }
+  if (rtcMagic == BOOTDIAG_MAGIC) {     // warm reset: carry the counters over
+    rtcBootCount++;
+    rtcLastRunSec = rtcRunSec;
+  } else {                              // cold boot: RTC contents are garbage
+    rtcMagic = BOOTDIAG_MAGIC;
+    rtcBootCount = 1;
+    rtcLastRunSec = 0;
+  }
+  rtcRunSec  = 0;
+  bootCount  = rtcBootCount;
+  lastRunSec = rtcLastRunSec;
+  Serial.printf("[boot] reason=%s boot#%lu lastRun=%lus\n",
+                resetReasonStr, (unsigned long)bootCount, (unsigned long)lastRunSec);
+}
+
 bool     otaActive     = false;   // true while an OTA update is being written
 
 Preferences prefs;                // NVS store for mode + ceiling
@@ -2546,56 +2597,6 @@ void netWatchdog() {
 // ============================================================
 //  SETUP
 // ============================================================
-// ============================================================
-//  BOOT DIAGNOSTICS
-//  Answers "why did the board reset" without a PC attached. Values are
-//  captured once at boot and surfaced in the web GUI Help panel.
-//
-//  RTC_NOINIT_ATTR survives a reset (software, panic, watchdog, and in the
-//  usual case brownout) because the RTC domain stays powered through the
-//  reset pulse. It is deliberately NOT cleared on a warm boot: a magic word
-//  tells us whether the values are carried over or garbage from a genuine
-//  cold power-up. If the rail collapses hard enough to drop the RTC domain
-//  too, the counters restart and the reason reads as a power-on, which is
-//  itself the signal that power was fully lost rather than merely sagging.
-// ============================================================
-#define BOOTDIAG_MAGIC 0xB007D1A6
-RTC_NOINIT_ATTR uint32_t rtcMagic;
-RTC_NOINIT_ATTR uint32_t rtcBootCount;
-RTC_NOINIT_ATTR uint32_t rtcLastRunSec;   // uptime reached just before the reset
-RTC_NOINIT_ATTR uint32_t rtcRunSec;       // live uptime, ticked once per second
-
-const char *resetReasonStr = "unknown";
-uint32_t bootCount = 1, lastRunSec = 0;
-
-void captureBootDiag() {
-  switch (esp_reset_reason()) {
-    case ESP_RST_POWERON:  resetReasonStr = "power-on";  break;
-    case ESP_RST_BROWNOUT: resetReasonStr = "BROWNOUT";  break;   // supply sagged
-    case ESP_RST_PANIC:    resetReasonStr = "PANIC";     break;   // firmware crash
-    case ESP_RST_INT_WDT:  resetReasonStr = "WDT-int";   break;
-    case ESP_RST_TASK_WDT: resetReasonStr = "WDT-task";  break;
-    case ESP_RST_WDT:      resetReasonStr = "WDT-other"; break;
-    case ESP_RST_SW:       resetReasonStr = "sw-restart"; break;  // our own ESP.restart
-    case ESP_RST_DEEPSLEEP: resetReasonStr = "deepsleep"; break;
-    case ESP_RST_EXT:      resetReasonStr = "ext-pin";   break;
-    default:               resetReasonStr = "unknown";   break;
-  }
-  if (rtcMagic == BOOTDIAG_MAGIC) {     // warm reset: carry the counters over
-    rtcBootCount++;
-    rtcLastRunSec = rtcRunSec;
-  } else {                              // cold boot: RTC contents are garbage
-    rtcMagic = BOOTDIAG_MAGIC;
-    rtcBootCount = 1;
-    rtcLastRunSec = 0;
-  }
-  rtcRunSec  = 0;
-  bootCount  = rtcBootCount;
-  lastRunSec = rtcLastRunSec;
-  Serial.printf("[boot] reason=%s boot#%lu lastRun=%lus\n",
-                resetReasonStr, (unsigned long)bootCount, (unsigned long)lastRunSec);
-}
-
 void setup() {
   Serial.begin(115200);
   delay(100);
