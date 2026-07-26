@@ -50,6 +50,7 @@
 //  INCLUDES
 // ============================================================
 #include <Arduino.h>
+#include <esp_system.h>   // esp_reset_reason() for the boot diagnostics
 #include "FastAccelStepper.h"
 #include <TMCStepper.h>
 #include <Preferences.h>   // NVS persistence of mode + ceiling
@@ -1654,7 +1655,7 @@ DNSServer        dns;
 #define DEF_AP_PASS "kinetic123"
 #define DEF_HOST    "sculpture"
 #define OTA_PASS    "kinetic"    // required by the IDE when uploading over WiFi
-#define FW_VERSION  "2.4.5"      // shown in the UI; bump on each release
+#define FW_VERSION  "2.4.6"      // shown in the UI; bump on each release
 // Pre-filled into the OTA box so a fresh board can self-update with one tap. The
 // CI workflow publishes firmware.bin to this rolling "latest" release on push.
 #define DEF_FW_URL  "https://github.com/knnurl/kinesthetic/releases/download/latest/firmware.bin"
@@ -2187,12 +2188,13 @@ void sendTelemetry() {
     queueOffPending = false;
     wsSendAll("{\"type\":\"queueoff\"}");
   }
-  char buf[640];   // grown for the swarm + sensor + diagnostics fields; snprintf truncates silently if undersized
+  char buf[768];   // grown for the swarm + sensor + boot diagnostics fields; snprintf truncates silently if undersized
   snprintf(buf, sizeof(buf),
     "{\"type\":\"tele\",\"mode\":%u,\"enabled\":%s,\"speed\":%d,\"qi\":%d,\"gesture\":\"%s\","
     "\"derate\":%d,\"fault\":{\"tmc\":%s,\"otp\":%s,\"tof\":%s},\"sg\":%u,"
     "\"netmode\":\"%s\",\"netip\":\"%s\",\"sl\":%d,\"hand\":%d,"
     "\"tof\":%d,\"tofp\":%d,\"ta\":%u,\"dir\":%d,\"ten\":%d,\"ff\":%d,\"tmax\":%d,\"heap\":%u,\"up\":%lu,"
+    "\"rst\":\"%s\",\"boots\":%lu,\"lastrun\":%lu,\"minheap\":%u,"
     "\"sw\":{\"on\":%d,\"cond\":%d,\"sync\":%d,\"x\":%.2f,\"y\":%.2f,\"pat\":%u,\"amp\":%.2f},"
     "\"sen\":{\"en\":%d,\"cue\":%d,\"g\":%.2f,\"blobs\":%u,\"mode\":%u},"
     "\"leds\":" LEDS_JSON "}",
@@ -2205,6 +2207,8 @@ void sendTelemetry() {
     sgLoad, netMode.c_str(), netIp.c_str(), sliderPctForTele(), tofControl ? 1 : 0,
     filtDist, tofPresent ? 1 : 0, (unsigned)tofAddr, tofDir, tofEnabled ? 1 : 0, tofFarFast ? 1 : 0, tofMaxDist,
     (unsigned)ESP.getFreeHeap(), (unsigned long)(millis() / 1000),
+    resetReasonStr, (unsigned long)bootCount, (unsigned long)lastRunSec,
+    (unsigned)ESP.getMinFreeHeap(),
     (mode == MODE_SWARM) ? 1 : 0, swarmConductor ? 1 : 0,
     (swarmConductor || (swarmLastBeacon && millis() - swarmLastBeacon < SWARM_TIMEOUT_MS)) ? 1 : 0,
     swarmX, swarmY, swarmPatternId, swarmAmp,
@@ -2542,9 +2546,60 @@ void netWatchdog() {
 // ============================================================
 //  SETUP
 // ============================================================
+// ============================================================
+//  BOOT DIAGNOSTICS
+//  Answers "why did the board reset" without a PC attached. Values are
+//  captured once at boot and surfaced in the web GUI Help panel.
+//
+//  RTC_NOINIT_ATTR survives a reset (software, panic, watchdog, and in the
+//  usual case brownout) because the RTC domain stays powered through the
+//  reset pulse. It is deliberately NOT cleared on a warm boot: a magic word
+//  tells us whether the values are carried over or garbage from a genuine
+//  cold power-up. If the rail collapses hard enough to drop the RTC domain
+//  too, the counters restart and the reason reads as a power-on, which is
+//  itself the signal that power was fully lost rather than merely sagging.
+// ============================================================
+#define BOOTDIAG_MAGIC 0xB007D1A6
+RTC_NOINIT_ATTR uint32_t rtcMagic;
+RTC_NOINIT_ATTR uint32_t rtcBootCount;
+RTC_NOINIT_ATTR uint32_t rtcLastRunSec;   // uptime reached just before the reset
+RTC_NOINIT_ATTR uint32_t rtcRunSec;       // live uptime, ticked once per second
+
+const char *resetReasonStr = "unknown";
+uint32_t bootCount = 1, lastRunSec = 0;
+
+void captureBootDiag() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  resetReasonStr = "power-on";  break;
+    case ESP_RST_BROWNOUT: resetReasonStr = "BROWNOUT";  break;   // supply sagged
+    case ESP_RST_PANIC:    resetReasonStr = "PANIC";     break;   // firmware crash
+    case ESP_RST_INT_WDT:  resetReasonStr = "WDT-int";   break;
+    case ESP_RST_TASK_WDT: resetReasonStr = "WDT-task";  break;
+    case ESP_RST_WDT:      resetReasonStr = "WDT-other"; break;
+    case ESP_RST_SW:       resetReasonStr = "sw-restart"; break;  // our own ESP.restart
+    case ESP_RST_DEEPSLEEP: resetReasonStr = "deepsleep"; break;
+    case ESP_RST_EXT:      resetReasonStr = "ext-pin";   break;
+    default:               resetReasonStr = "unknown";   break;
+  }
+  if (rtcMagic == BOOTDIAG_MAGIC) {     // warm reset: carry the counters over
+    rtcBootCount++;
+    rtcLastRunSec = rtcRunSec;
+  } else {                              // cold boot: RTC contents are garbage
+    rtcMagic = BOOTDIAG_MAGIC;
+    rtcBootCount = 1;
+    rtcLastRunSec = 0;
+  }
+  rtcRunSec  = 0;
+  bootCount  = rtcBootCount;
+  lastRunSec = rtcLastRunSec;
+  Serial.printf("[boot] reason=%s boot#%lu lastRun=%lus\n",
+                resetReasonStr, (unsigned long)bootCount, (unsigned long)lastRunSec);
+}
+
 void setup() {
   Serial.begin(115200);
   delay(100);
+  captureBootDiag();   // first, so nothing else can obscure the reset reason
 
   // FastAccelStepper owns STEP, DIR and the active-low ENN pin.
   engine.init();
@@ -2672,7 +2727,11 @@ void loop() {
 
   // Persistence check: 1Hz (the actual NVS write is debounced inside).
   static uint32_t tPersist = 0;
-  if (now - tPersist >= 1000) { tPersist = now; persistTask(); }
+  if (now - tPersist >= 1000) {
+    tPersist = now;
+    persistTask();
+    rtcRunSec = now / 1000;   // RAM write, survives a reset so we know how long it ran
+  }
 
 #ifdef INPUT_TOF_WIFI
   // Telemetry broadcast: 4Hz.

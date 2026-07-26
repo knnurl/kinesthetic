@@ -775,7 +775,20 @@ function dbgRender(t){let f=t.fault||{},sw=t.sw||{},sn=t.sen||{};
   'swarm '+(sw.on?'ON':'off')+' / '+(sw.cond?'conductor':'follower')+(sw.on?(sw.sync?' / synced':' / NO CLOCK'):'')+'  pat'+sw.pat+' amp'+Math.round((sw.amp||0)*100)+'%  pos '+sw.x+','+sw.y,
   'sensor '+(sn.en?'on':'off')+'  cue:'+(sn.cue?'live':'idle')+'  gain'+Math.round((sn.g||0)*100)+'%  blobs'+sn.blobs+'  mode'+sn.mode,
   'net '+t.netmode+' '+t.netip+'   free heap '+Math.round((t.heap||0)/1024)+' kB'
- ].join('\n');}
+   +(t.minheap?('  (min '+Math.round(t.minheap/1024)+' kB)'):''),
+  'last reset '+(t.rst||'-')+'   boot #'+(t.boots||1)
+   +(t.lastrun?('   previous run '+fmtUp(t.lastrun)):'   (first run since power-up)'),
+  bootHint(t)
+ ].filter(Boolean).join('\n');}
+// Plain-language reading of the reset reason, so a reset can be diagnosed
+// from the phone without a serial console attached.
+function bootHint(t){
+ if(!t.rst)return '';
+ if(t.rst=='BROWNOUT')return '  ^ supply sagged below the brownout threshold: power path, not firmware';
+ if(t.rst=='PANIC')return '  ^ firmware crash: check the serial log for the backtrace';
+ if(t.rst.indexOf('WDT')===0)return '  ^ watchdog: something blocked the loop for too long';
+ if(t.rst=='power-on')return '  ^ clean power-up, or the supply dropped hard enough to lose RTC memory';
+ return '';}
 function doUpdate(){if(!fwurl.value){fwnote.textContent='Enter a .bin URL first';return;}fwnote.textContent='Starting...';cmd({cmd:'fwupdate',url:fwurl.value});}
 // Tell every connected fleet sculpture (and this one) to pull the same .bin.
 // Peers first so this page stays alive to report, then this device last.

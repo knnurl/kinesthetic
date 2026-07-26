@@ -1,0 +1,176 @@
+From 92b9ff4c3ae967ea1af7669c7a847b0b2b9e09cc Mon Sep 17 00:00:00 2001
+From: Kaan <kaan@local>
+Date: Sun, 26 Jul 2026 12:31:13 +0000
+Subject: [PATCH] Add boot diagnostics: reset reason, boot count, previous run
+ length (fw 2.4.6)
+
+Surfaces why the board reset, readable from the phone with no serial
+console attached. Added because the board runs for a while then resets
+on the mains supply and the cause is unknown.
+
+Firmware:
+- captureBootDiag() runs first in setup() so nothing obscures the reason
+- esp_reset_reason() mapped to a short label (BROWNOUT, PANIC, WDT, etc)
+- RTC_NOINIT_ATTR counters survive a reset, guarded by a magic word so a
+  genuine cold boot is distinguishable from a warm one
+- live uptime ticked into RTC memory each second, so after a reset the
+  previous run length is known
+- telemetry gains rst, boots, lastrun, minheap; buffer grown 640 to 768
+
+Web GUI (Help panel diagnostics dump):
+- new line: last reset reason, boot number, previous run length
+- free heap line now also shows the minimum ever seen (catches a leak)
+- plain-language hint explaining what each reset reason implies
+---
+ kinetic_sculpture.ino | 65 +++++++++++++++++++++++++++++++++++++++++--
+ page.h                | 15 +++++++++-
+ 2 files changed, 76 insertions(+), 4 deletions(-)
+
+diff --git a/kinetic_sculpture.ino b/kinetic_sculpture.ino
+index dea86d5..3e38cbe 100644
+--- a/kinetic_sculpture.ino
++++ b/kinetic_sculpture.ino
+@@ -50,6 +50,7 @@
+ //  INCLUDES
+ // ============================================================
+ #include <Arduino.h>
++#include <esp_system.h>   // esp_reset_reason() for the boot diagnostics
+ #include "FastAccelStepper.h"
+ #include <TMCStepper.h>
+ #include <Preferences.h>   // NVS persistence of mode + ceiling
+@@ -1654,7 +1655,7 @@ DNSServer        dns;
+ #define DEF_AP_PASS "kinetic123"
+ #define DEF_HOST    "sculpture"
+ #define OTA_PASS    "kinetic"    // required by the IDE when uploading over WiFi
+-#define FW_VERSION  "2.4.5"      // shown in the UI; bump on each release
++#define FW_VERSION  "2.4.6"      // shown in the UI; bump on each release
+ // Pre-filled into the OTA box so a fresh board can self-update with one tap. The
+ // CI workflow publishes firmware.bin to this rolling "latest" release on push.
+ #define DEF_FW_URL  "https://github.com/knnurl/kinesthetic/releases/download/latest/firmware.bin"
+@@ -2187,12 +2188,13 @@ void sendTelemetry() {
+     queueOffPending = false;
+     wsSendAll("{\"type\":\"queueoff\"}");
+   }
+-  char buf[640];   // grown for the swarm + sensor + diagnostics fields; snprintf truncates silently if undersized
++  char buf[768];   // grown for the swarm + sensor + boot diagnostics fields; snprintf truncates silently if undersized
+   snprintf(buf, sizeof(buf),
+     "{\"type\":\"tele\",\"mode\":%u,\"enabled\":%s,\"speed\":%d,\"qi\":%d,\"gesture\":\"%s\","
+     "\"derate\":%d,\"fault\":{\"tmc\":%s,\"otp\":%s,\"tof\":%s},\"sg\":%u,"
+     "\"netmode\":\"%s\",\"netip\":\"%s\",\"sl\":%d,\"hand\":%d,"
+     "\"tof\":%d,\"tofp\":%d,\"ta\":%u,\"dir\":%d,\"ten\":%d,\"ff\":%d,\"tmax\":%d,\"heap\":%u,\"up\":%lu,"
++    "\"rst\":\"%s\",\"boots\":%lu,\"lastrun\":%lu,\"minheap\":%u,"
+     "\"sw\":{\"on\":%d,\"cond\":%d,\"sync\":%d,\"x\":%.2f,\"y\":%.2f,\"pat\":%u,\"amp\":%.2f},"
+     "\"sen\":{\"en\":%d,\"cue\":%d,\"g\":%.2f,\"blobs\":%u,\"mode\":%u},"
+     "\"leds\":" LEDS_JSON "}",
+@@ -2205,6 +2207,8 @@ void sendTelemetry() {
+     sgLoad, netMode.c_str(), netIp.c_str(), sliderPctForTele(), tofControl ? 1 : 0,
+     filtDist, tofPresent ? 1 : 0, (unsigned)tofAddr, tofDir, tofEnabled ? 1 : 0, tofFarFast ? 1 : 0, tofMaxDist,
+     (unsigned)ESP.getFreeHeap(), (unsigned long)(millis() / 1000),
++    resetReasonStr, (unsigned long)bootCount, (unsigned long)lastRunSec,
++    (unsigned)ESP.getMinFreeHeap(),
+     (mode == MODE_SWARM) ? 1 : 0, swarmConductor ? 1 : 0,
+     (swarmConductor || (swarmLastBeacon && millis() - swarmLastBeacon < SWARM_TIMEOUT_MS)) ? 1 : 0,
+     swarmX, swarmY, swarmPatternId, swarmAmp,
+@@ -2542,9 +2546,60 @@ void netWatchdog() {
+ // ============================================================
+ //  SETUP
+ // ============================================================
++// ============================================================
++//  BOOT DIAGNOSTICS
++//  Answers "why did the board reset" without a PC attached. Values are
++//  captured once at boot and surfaced in the web GUI Help panel.
++//
++//  RTC_NOINIT_ATTR survives a reset (software, panic, watchdog, and in the
++//  usual case brownout) because the RTC domain stays powered through the
++//  reset pulse. It is deliberately NOT cleared on a warm boot: a magic word
++//  tells us whether the values are carried over or garbage from a genuine
++//  cold power-up. If the rail collapses hard enough to drop the RTC domain
++//  too, the counters restart and the reason reads as a power-on, which is
++//  itself the signal that power was fully lost rather than merely sagging.
++// ============================================================
++#define BOOTDIAG_MAGIC 0xB007D1A6
++RTC_NOINIT_ATTR uint32_t rtcMagic;
++RTC_NOINIT_ATTR uint32_t rtcBootCount;
++RTC_NOINIT_ATTR uint32_t rtcLastRunSec;   // uptime reached just before the reset
++RTC_NOINIT_ATTR uint32_t rtcRunSec;       // live uptime, ticked once per second
++
++const char *resetReasonStr = "unknown";
++uint32_t bootCount = 1, lastRunSec = 0;
++
++void captureBootDiag() {
++  switch (esp_reset_reason()) {
++    case ESP_RST_POWERON:  resetReasonStr = "power-on";  break;
++    case ESP_RST_BROWNOUT: resetReasonStr = "BROWNOUT";  break;   // supply sagged
++    case ESP_RST_PANIC:    resetReasonStr = "PANIC";     break;   // firmware crash
++    case ESP_RST_INT_WDT:  resetReasonStr = "WDT-int";   break;
++    case ESP_RST_TASK_WDT: resetReasonStr = "WDT-task";  break;
++    case ESP_RST_WDT:      resetReasonStr = "WDT-other"; break;
++    case ESP_RST_SW:       resetReasonStr = "sw-restart"; break;  // our own ESP.restart
++    case ESP_RST_DEEPSLEEP: resetReasonStr = "deepsleep"; break;
++    case ESP_RST_EXT:      resetReasonStr = "ext-pin";   break;
++    default:               resetReasonStr = "unknown";   break;
++  }
++  if (rtcMagic == BOOTDIAG_MAGIC) {     // warm reset: carry the counters over
++    rtcBootCount++;
++    rtcLastRunSec = rtcRunSec;
++  } else {                              // cold boot: RTC contents are garbage
++    rtcMagic = BOOTDIAG_MAGIC;
++    rtcBootCount = 1;
++    rtcLastRunSec = 0;
++  }
++  rtcRunSec  = 0;
++  bootCount  = rtcBootCount;
++  lastRunSec = rtcLastRunSec;
++  Serial.printf("[boot] reason=%s boot#%lu lastRun=%lus\n",
++                resetReasonStr, (unsigned long)bootCount, (unsigned long)lastRunSec);
++}
++
+ void setup() {
+   Serial.begin(115200);
+   delay(100);
++  captureBootDiag();   // first, so nothing else can obscure the reset reason
+ 
+   // FastAccelStepper owns STEP, DIR and the active-low ENN pin.
+   engine.init();
+@@ -2672,7 +2727,11 @@ void loop() {
+ 
+   // Persistence check: 1Hz (the actual NVS write is debounced inside).
+   static uint32_t tPersist = 0;
+-  if (now - tPersist >= 1000) { tPersist = now; persistTask(); }
++  if (now - tPersist >= 1000) {
++    tPersist = now;
++    persistTask();
++    rtcRunSec = now / 1000;   // RAM write, survives a reset so we know how long it ran
++  }
+ 
+ #ifdef INPUT_TOF_WIFI
+   // Telemetry broadcast: 4Hz.
+diff --git a/page.h b/page.h
+index 882f546..1c48a11 100644
+--- a/page.h
++++ b/page.h
+@@ -775,7 +775,20 @@ function dbgRender(t){let f=t.fault||{},sw=t.sw||{},sn=t.sen||{};
+   'swarm '+(sw.on?'ON':'off')+' / '+(sw.cond?'conductor':'follower')+(sw.on?(sw.sync?' / synced':' / NO CLOCK'):'')+'  pat'+sw.pat+' amp'+Math.round((sw.amp||0)*100)+'%  pos '+sw.x+','+sw.y,
+   'sensor '+(sn.en?'on':'off')+'  cue:'+(sn.cue?'live':'idle')+'  gain'+Math.round((sn.g||0)*100)+'%  blobs'+sn.blobs+'  mode'+sn.mode,
+   'net '+t.netmode+' '+t.netip+'   free heap '+Math.round((t.heap||0)/1024)+' kB'
+- ].join('\n');}
++   +(t.minheap?('  (min '+Math.round(t.minheap/1024)+' kB)'):''),
++  'last reset '+(t.rst||'-')+'   boot #'+(t.boots||1)
++   +(t.lastrun?('   previous run '+fmtUp(t.lastrun)):'   (first run since power-up)'),
++  bootHint(t)
++ ].filter(Boolean).join('\n');}
++// Plain-language reading of the reset reason, so a reset can be diagnosed
++// from the phone without a serial console attached.
++function bootHint(t){
++ if(!t.rst)return '';
++ if(t.rst=='BROWNOUT')return '  ^ supply sagged below the brownout threshold: power path, not firmware';
++ if(t.rst=='PANIC')return '  ^ firmware crash: check the serial log for the backtrace';
++ if(t.rst.indexOf('WDT')===0)return '  ^ watchdog: something blocked the loop for too long';
++ if(t.rst=='power-on')return '  ^ clean power-up, or the supply dropped hard enough to lose RTC memory';
++ return '';}
+ function doUpdate(){if(!fwurl.value){fwnote.textContent='Enter a .bin URL first';return;}fwnote.textContent='Starting...';cmd({cmd:'fwupdate',url:fwurl.value});}
+ // Tell every connected fleet sculpture (and this one) to pull the same .bin.
+ // Peers first so this page stays alive to report, then this device last.
+-- 
+2.43.0
+
